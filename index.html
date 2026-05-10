@@ -1,0 +1,1202 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>TG Motocross 2 - HTML5 Port</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+        }
+
+        body {
+            background: #0a0f1e;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: 'Arial Narrow', Arial, 'Elementary SF Black', 'Chanson Heavy SF', Tahoma, monospace;
+        }
+
+        #game-container {
+            position: relative;
+            box-shadow: 0 0 50px rgba(0, 0, 0, 0.5);
+            border: 4px solid #444;
+            background: #000;
+        }
+
+        canvas {
+            display: block;
+            image-rendering: crisp-edges;
+            image-rendering: pixelated;
+            cursor: pointer;
+        }
+
+        /* Hide the old HTML overlays – we now draw everything on canvas */
+        #ui-overlay {
+            display: none;
+        }
+
+        /* HUD elements are still visible */
+        .hud-text {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-weight: bold;
+            color: #fff;
+            font-size: 14px;
+            pointer-events: none;
+            font-family: 'Arial Narrow', Arial, 'Elementary SF Black', 'Chanson Heavy SF', Tahoma, monospace;
+        }
+
+        #timer {
+            top: 10px;
+            left: 10px;
+        }
+
+        #lap {
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        #speedometer {
+            bottom: 10px;
+            top: auto;
+            left: auto;
+            right: 10px;
+            font-size: 20px;
+        }
+
+        #debug {
+            position: absolute;
+            bottom: 5px;
+            left: 10px;
+            font-size: 10px;
+            color: #0f0;
+            background: rgba(0, 0, 0, 0.5);
+            pointer-events: none;
+            font-family: monospace;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="game-container">
+        <canvas id="gameCanvas" width="800" height="500"></canvas>
+        <!-- No UI overlay divs – canvas draws everything -->
+        <!-- HUD elements (still needed) -->
+        <div id="timer" class="hud-text">TIME 00:00.00</div>
+        <div id="lap" class="hud-text">LAP 1 / 3</div>
+        <div id="speedometer" class="hud-text"><span id="speed-val">0</span> km/h</div>
+        <div id="debug"></div>
+    </div>
+
+    <script src="maps.js"></script>
+    <script>
+        (function () {
+            const canvas = document.getElementById('gameCanvas');
+            const ctx = canvas.getContext('2d');
+            const debugDiv = document.getElementById('debug');
+
+            // ---------- Constants ----------
+            const GRAVITY = 800;
+            const WHEEL_RADIUS = 12;
+            const ACCEL = 260;
+            const BRAKE_FORCE = 400;
+            const LEAN_SPEED = 4.0;
+            const MAX_LEAN = 0.65;
+            const TOTAL_LAPS = 3;
+            const PLAYER_VISUAL_OFFSET_Y = 255;   // pixels to shift bike and rider downward on screen
+
+            // ---------- World ----------
+            let currentLevel = 0;
+            let levelWidth = 0, levelHeight = 0;
+            let mapData = null;
+
+            // ---------- Game State ----------
+            let gameState = 'menu';        // 'menu', 'playing', 'paused', 'gameover', 'win'
+            let subMenu = null;            // null, 'howto', 'about'
+            let startProtection = 1.0;
+            let finalRaceTime = 0;          // store final time for win screen
+
+            // ---------- Race Timer ----------
+            let raceTime = 0;          // milliseconds
+            let raceTimeRunning = false;
+
+            // ---------- Lap & Stage ----------
+            let currentLap = 1;
+            let currentStage = 1;
+            let lapCrossed = false;
+            let finishLineX = 0;        // will be set after levelWidth known
+
+            // ---------- Bike ----------
+            let points = [], prevPoints = [], constraints = [];
+            let bikeVelocity = 0, bikeLeanAngle = 0, targetLean = 0;
+            let cameraX = 0, cameraY = 0;
+            let wheelAngle = 50;  // for wheel spin
+
+            // ---------- Particles ----------
+            let particles = [];
+            const dirtImages = [];
+            for (let i = 1; i <= 8; i++) {
+                const img = new Image();
+                img.src = `assets/sprites/dirt/${i}.png`;
+                dirtImages.push(img);
+            }
+
+            // ---------- Minimap cache ----------
+            const MINIMAP_WIDTH = 140;
+            const MINIMAP_HEIGHT = 45;
+            const MINIMAP_X = canvas.width - 150;  // 10px padding from right edge
+            const MINIMAP_Y = 10;
+            let minimapTerrainPoints = [];
+            let minimapMinY = 0;
+            let minimapMaxY = 0;
+
+            // ---------- Sound Toggle ----------
+            let soundEnabled = true;
+            const SOUND_BTN_W = 44;
+            const SOUND_BTN_H = 26;
+            const SOUND_BTN_X = canvas.width - SOUND_BTN_W - 10;
+            const SOUND_BTN_Y = canvas.height - 28 - 28 - SOUND_BTN_H; // increased gap from 5 to 20
+
+            // ---------- Background Music ----------
+            const bgMusic = new Audio('music/mondamusic-retro-arcade-game-music-512837.mp3');
+            bgMusic.loop = true;
+            bgMusic.volume = 1.0;
+
+            // Synchronise music with game state and sound button
+            function syncMusic() {
+                const shouldPlay = (gameState === 'playing' || gameState === 'paused') && soundEnabled;
+                if (shouldPlay) {
+                    // play() returns a promise; ignore errors (e.g., lack of user gesture)
+                    bgMusic.play().catch(() => { });
+                } else {
+                    bgMusic.pause();
+                }
+            }
+
+            // ---------- Assets ----------
+            const assets = {};
+            const assetPaths = {
+                tiles: 'assets/tiles.png',
+                wheel: 'assets/sprites/wheel/1.png',
+                body: 'assets/sprites/bikeBody/1.png',
+                backShaft: 'assets/sprites/bikeBackShaft/1.png',
+                frontShockBase: 'assets/sprites/bikeFrontShockBase/1.png',
+                frontShockShaft: 'assets/sprites/bikeFrontShockShaft/1.png',
+                frontShockTip: 'assets/sprites/bikeFrontShockTip/1.png',
+                manTorso: 'assets/sprites/manTorso/1.png',
+                manHead: 'assets/sprites/manHead/1.png',
+                manArm: 'assets/sprites/manArm/1.png',
+                manForearm: 'assets/sprites/manForearm/1.png',
+                manThigh: 'assets/sprites/manThigh/1.png',
+                manShin: 'assets/sprites/manShin/1.png',
+                bg: 'assets/sprites/bg/1.png'
+            };
+            let assetsLoaded = 0;
+            const totalAssets = Object.keys(assetPaths).length;
+
+            function loadAssets() {
+                for (let key in assetPaths) {
+                    const img = new Image();
+                    img.onload = () => { assetsLoaded++; if (assetsLoaded === totalAssets) console.log("Assets ready"); };
+                    img.onerror = () => {
+                        console.error(`Failed ${key}`);
+                        const fallback = document.createElement('canvas');
+                        fallback.width = fallback.height = 32;
+                        fallback.getContext('2d').fillStyle = key === 'tiles' ? '#555' : '#f0f';
+                        fallback.getContext('2d').fillRect(0, 0, 32, 32);
+                        assets[key] = fallback;
+                        assetsLoaded++;
+                    };
+                    img.src = assetPaths[key];
+                    assets[key] = img;
+                }
+            }
+
+            // ---------- Menu button areas (scaled to canvas height) ----------
+            const menuButtons = [
+                { label: "PRACTICE", y: Math.round(260 * canvas.height / 600), action: () => startGame() },
+                { label: "COMPETE", y: Math.round(320 * canvas.height / 600), action: () => startGame() },
+                { label: "HOW TO PLAY", y: Math.round(380 * canvas.height / 600), action: () => { subMenu = 'howto'; } },
+                { label: "ABOUT", y: Math.round(440 * canvas.height / 600), action: () => { subMenu = 'about'; } }
+            ];
+            const btnWidth = 220, btnHeight = 44;
+            const btnX = (canvas.width - btnWidth) / 2;
+
+            // ---------- Game over screen buttons ----------
+            let gameOverButtons = [
+                { label: "RETRY", x: canvas.width / 2 - 110, y: Math.round(400 * canvas.height / 600), width: 100, height: 40, action: () => retryGame() },
+                { label: "MENU", x: canvas.width / 2 + 10, y: Math.round(400 * canvas.height / 600), width: 100, height: 40, action: () => { gameState = 'menu'; subMenu = null; syncMusic(); } }
+            ];
+
+            // ---------- Win screen buttons ----------
+            let winButtons = [
+                { label: "NEXT STAGE", x: canvas.width / 2 - 110, y: Math.round(450 * canvas.height / 600), width: 100, height: 40, action: () => retryGame() },
+                { label: "MENU", x: canvas.width / 2 + 10, y: Math.round(450 * canvas.height / 600), width: 100, height: 40, action: () => { gameState = 'menu'; subMenu = null; syncMusic(); } }
+            ];
+
+            // ---------- Mouse handling (single listener) ----------
+            let mouseX = 0, mouseY = 0;
+            let hoverIndex = -1;
+            canvas.addEventListener('mousemove', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+                mouseX = (e.clientX - rect.left) * scaleX;
+                mouseY = (e.clientY - rect.top) * scaleY;
+                if (gameState === 'menu' && !subMenu) {
+                    hoverIndex = -1;
+                    for (let i = 0; i < menuButtons.length; i++) {
+                        const btn = menuButtons[i];
+                        if (mouseX >= btnX && mouseX <= btnX + btnWidth &&
+                            mouseY >= btn.y && mouseY <= btn.y + btnHeight) {
+                            hoverIndex = i;
+                            break;
+                        }
+                    }
+                } else if (gameState === 'gameover') {
+                    hoverIndex = -1;
+                    for (let i = 0; i < gameOverButtons.length; i++) {
+                        const btn = gameOverButtons[i];
+                        if (mouseX >= btn.x && mouseX <= btn.x + btn.width &&
+                            mouseY >= btn.y && mouseY <= btn.y + btn.height) {
+                            hoverIndex = i;
+                            break;
+                        }
+                    }
+                } else if (gameState === 'win') {
+                    hoverIndex = -1;
+                    for (let i = 0; i < winButtons.length; i++) {
+                        const btn = winButtons[i];
+                        if (mouseX >= btn.x && mouseX <= btn.x + btn.width &&
+                            mouseY >= btn.y && mouseY <= btn.y + btn.height) {
+                            hoverIndex = i;
+                            break;
+                        }
+                    }
+                } else {
+                    hoverIndex = -1;
+                }
+            });
+
+            canvas.addEventListener('click', (e) => {
+                // Sound toggle button (always active)
+                if (mouseX >= SOUND_BTN_X && mouseX <= SOUND_BTN_X + SOUND_BTN_W &&
+                    mouseY >= SOUND_BTN_Y && mouseY <= SOUND_BTN_Y + SOUND_BTN_H) {
+                    soundEnabled = !soundEnabled;
+                    syncMusic();
+                    return;
+                }
+                if (gameState === 'menu') {
+                    if (subMenu) {
+                        if (mouseX >= canvas.width - 100 && mouseX <= canvas.width - 20 &&
+                            mouseY >= 20 && mouseY <= 60) {
+                            subMenu = null;
+                        }
+                    } else {
+                        if (hoverIndex !== -1) {
+                            menuButtons[hoverIndex].action();
+                        }
+                    }
+                } else if (gameState === 'gameover') {
+                    if (hoverIndex !== -1) {
+                        gameOverButtons[hoverIndex].action();
+                    }
+                } else if (gameState === 'win') {
+                    if (hoverIndex !== -1) {
+                        winButtons[hoverIndex].action();
+                    }
+                }
+            });
+
+            // ---------- Input (keyboard) ----------
+            const keys = {};
+            window.addEventListener('keydown', (e) => {
+                keys[e.code] = true;
+                if (e.code === 'Space' && gameState === 'menu') startGame();
+                if (e.code === 'KeyR' && (gameState === 'gameover' || gameState === 'win')) retryGame();
+                if (e.code === 'KeyP' && (gameState === 'playing' || gameState === 'paused')) {
+                    e.preventDefault();
+                    if (gameState === 'playing') {
+                        gameState = 'paused';
+                        raceTimeRunning = false;
+                    } else if (gameState === 'paused') {
+                        gameState = 'playing';
+                        raceTimeRunning = true;
+                    }
+                    syncMusic();  // music follows paused/playing state
+                }
+                if (e.code === 'KeyM') {
+                    soundEnabled = !soundEnabled;
+                    syncMusic();
+                }
+            });
+            window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+            function retryGame() {
+                initLevel(0);
+            }
+
+            // ---------- Terrain ----------
+            function getTerrainHeightAt(x) {
+                if (!mapData) return 10000;
+                const colStep = 16;
+                const col = Math.floor(x / colStep);
+                if (col < 0 || col >= mapData[0].length) return 10000;
+
+                let bestGroundY = 10000;
+                for (let c = Math.max(0, col - 1); c <= Math.min(col + 1, mapData[0].length - 1); c++) {
+                    const relX = x - c * colStep;
+                    if (relX < -1 || relX > colStep + 1) continue;
+                    const clampedRelX = Math.max(0, Math.min(colStep, relX));
+                    for (let row = 0; row < mapData.length; row++) {
+                        const tileVal = mapData[row][c];
+                        if (!tileVal) continue;
+                        const segIndex = tileVal >> 8;
+                        const segments = window.F9Fe[segIndex];
+                        if (!segments || segments.length === 0) continue;
+                        const tileWorldY = row * 32;
+                        for (let i = 0; i < segments.length; i += 5) {
+                            const x1 = segments[i];
+                            const y1 = segments[i + 1];
+                            const x2 = segments[i + 2];
+                            const y2 = segments[i + 3];
+                            const minX = Math.min(x1, x2);
+                            const maxX = Math.max(x1, x2);
+                            if (clampedRelX < minX - 0.5 || clampedRelX > maxX + 0.5) continue;
+                            let segY;
+                            if (Math.abs(x2 - x1) < 0.5) segY = Math.min(y1, y2);
+                            else {
+                                const t = (clampedRelX - x1) / (x2 - x1);
+                                segY = y1 + t * (y2 - y1);
+                            }
+                            const worldY = tileWorldY + segY;
+                            if (worldY < bestGroundY) bestGroundY = worldY;
+                        }
+                    }
+                }
+                if (bestGroundY === 10000) {
+                    for (let row = 0; row < mapData.length; row++) {
+                        if (mapData[row][col]) {
+                            bestGroundY = row * 32;
+                            break;
+                        }
+                    }
+                }
+                return bestGroundY;
+            }
+
+            function findSafeStartY(x) {
+                let groundY = getTerrainHeightAt(x);
+                if (groundY < 10000) return groundY - WHEEL_RADIUS - 2;
+                return levelHeight - 80;
+            }
+
+            // ---------- Minimap cache ----------
+            function buildMinimapCache() {
+                if (!mapData) return;
+                const stepX = levelWidth / MINIMAP_WIDTH;
+                minimapTerrainPoints = [];
+                let minY = Infinity, maxY = -Infinity;
+                for (let i = 0; i <= MINIMAP_WIDTH; i++) {
+                    const worldX = i * stepX;
+                    let worldY = getTerrainHeightAt(worldX);
+                    if (worldY > 10000) worldY = levelHeight - 50;
+                    minimapTerrainPoints.push(worldY);
+                    if (worldY < minY) minY = worldY;
+                    if (worldY > maxY) maxY = worldY;
+                }
+                const range = maxY - minY;
+                if (range < 20) {
+                    minimapMinY = minY - 10;
+                    minimapMaxY = maxY + 10;
+                } else {
+                    minimapMinY = minY;
+                    minimapMaxY = maxY;
+                }
+            }
+
+            // ---------- Bike geometry ----------
+            function initBike(x, y) {
+                points = [
+                    { x: x, y: y }, { x: x + 65, y: y }, { x: x + 32, y: y - 20 },
+                    { x: x + 48, y: y - 42 }, { x: x + 15, y: y - 32 }
+                ];
+                prevPoints = points.map(p => ({ x: p.x, y: p.y }));
+                const dist = (i, j) => Math.hypot(points[i].x - points[j].x, points[i].y - points[j].y);
+                constraints = [
+                    { p1: 0, p2: 1, rest: dist(0, 1), stiff: 0.18 },
+                    { p1: 0, p2: 2, rest: dist(0, 2), stiff: 0.95 },
+                    { p1: 1, p2: 2, rest: dist(1, 2), stiff: 0.95 },
+                    { p1: 2, p2: 3, rest: dist(2, 3), stiff: 1.0 },
+                    { p1: 2, p2: 4, rest: dist(2, 4), stiff: 1.0 },
+                    { p1: 3, p2: 4, rest: dist(3, 4), stiff: 1.0 },
+                    { p1: 0, p2: 4, rest: dist(0, 4), stiff: 0.88 },
+                    { p1: 1, p2: 3, rest: dist(1, 3), stiff: 0.88 }
+                ];
+                bikeVelocity = 0;
+                bikeLeanAngle = 0;
+                targetLean = 0;
+                startProtection = 1.0;
+                wheelAngle = 0;
+                particles = [];
+            }
+
+            // ---------- Particles ----------
+            function spawnDirtParticles(wheelX, wheelY, velocity, throttle, brake) {
+                const speed = Math.abs(velocity);
+                const groundY = getTerrainHeightAt(wheelX);
+                const onGround = (wheelY + WHEEL_RADIUS) >= groundY - 5;
+                if (!onGround) return;
+
+                let intensity = 0;
+                if (throttle && speed > 50) intensity = 0.5 + (speed / 500);
+                else if (brake && speed > 30) intensity = 0.4 + (speed / 400);
+                else if (Math.abs(velocity) > 100) intensity = 0.2;
+                else return;
+
+                const count = Math.floor(Math.random() * 3 * intensity) + 1;
+                for (let i = 0; i < count; i++) {
+                    particles.push({
+                        x: wheelX + (Math.random() - 0.5) * 20,
+                        y: wheelY + WHEEL_RADIUS - 5,
+                        vx: (Math.random() - 0.5) * 80 * intensity,
+                        vy: -Math.random() * 100 * intensity,
+                        life: 0.5 + Math.random() * 0.5,
+                        size: 8 + Math.random() * 8,
+                        imgIndex: Math.floor(Math.random() * 8)
+                    });
+                }
+            }
+
+            // ---------- Physics ----------
+            function updatePhysics(dt) {
+                if (gameState !== 'playing') return;
+
+                const throttle = keys['ArrowUp'];
+                const brake = keys['ArrowDown'];
+                if (throttle) bikeVelocity += ACCEL * dt;
+                if (brake) bikeVelocity -= BRAKE_FORCE * dt;
+                bikeVelocity *= (1.0 - 0.70 * dt);
+                bikeVelocity = Math.min(450, Math.max(-150, bikeVelocity));
+
+                if (keys['ArrowLeft']) targetLean = -1;
+                else if (keys['ArrowRight']) targetLean = 1;
+                else targetLean = 0;
+                bikeLeanAngle += (targetLean * MAX_LEAN - bikeLeanAngle) * (LEAN_SPEED * dt);
+                bikeLeanAngle = Math.max(-MAX_LEAN, Math.min(MAX_LEAN, bikeLeanAngle));
+
+                for (let i = 0; i < points.length; i++) {
+                    const p = points[i];
+                    const pv = prevPoints[i];
+                    const vx = (p.x - pv.x) * 0.992;
+                    const vy = (p.y - pv.y) * 0.992;
+                    pv.x = p.x;
+                    pv.y = p.y;
+                    p.x += vx;
+                    p.y += vy + GRAVITY * dt * dt;
+                }
+
+                const axleAngle = Math.atan2(points[1].y - points[0].y, points[1].x - points[0].x);
+                const speedFactor = Math.min(1.0, Math.abs(bikeVelocity) / 200);
+                const steerAngle = axleAngle + bikeLeanAngle * 0.25 * speedFactor;
+                const driveX = bikeVelocity * dt * Math.cos(steerAngle);
+                const driveY = bikeVelocity * dt * Math.sin(steerAngle);
+                for (let p of points) { p.x += driveX; p.y += driveY; }
+
+                for (let iter = 0; iter < 12; iter++) {
+                    for (let c of constraints) {
+                        const p1 = points[c.p1];
+                        const p2 = points[c.p2];
+                        const dx = p2.x - p1.x;
+                        const dy = p2.y - p1.y;
+                        const d = Math.hypot(dx, dy);
+                        if (d < 0.001) continue;
+                        const corr = (c.rest - d) / d * c.stiff * 0.5;
+                        p1.x -= dx * corr;
+                        p1.y -= dy * corr;
+                        p2.x += dx * corr;
+                        p2.y += dy * corr;
+                    }
+                    for (let idx of [0, 1]) {
+                        const p = points[idx];
+                        const pv = prevPoints[idx];
+                        let gY = getTerrainHeightAt(p.x);
+                        if (gY < 10000 && p.y + WHEEL_RADIUS > gY) {
+                            p.y = gY - WHEEL_RADIUS;
+                            if (pv.y > p.y) pv.y = p.y + (pv.y - p.y) * 0.25;
+                            const slip = (p.x - pv.x) * 0.08;
+                            pv.x += slip;
+                        }
+                    }
+                }
+
+                const rear = points[0];
+                const front = points[1];
+                const midX = (rear.x + front.x) * 0.5;
+                const midY = (rear.y + front.y) * 0.5;
+                for (let i = 2; i < points.length; i++) {
+                    const p = points[i];
+                    const pv = prevPoints[i];
+                    const dx = p.x - midX;
+                    const dy = p.y - midY;
+                    const len = Math.hypot(dx, dy);
+                    if (len < 0.001) continue;
+                    const baseA = Math.atan2(dy, dx);
+                    const newA = baseA + bikeLeanAngle * 0.55;
+                    const newX = midX + Math.cos(newA) * len;
+                    const newY = midY + Math.sin(newA) * len;
+                    pv.x += (newX - p.x);
+                    pv.y += (newY - p.y);
+                    p.x = newX;
+                    p.y = newY;
+                }
+
+                for (let idx of [0, 1]) {
+                    if (points[idx].x < 30) points[idx].x = 30;
+                    if (points[idx].x > levelWidth - 30) points[idx].x = levelWidth - 30;
+                }
+
+                wheelAngle += bikeVelocity * dt * 0.5;
+
+                const rearWheel = points[0];
+                spawnDirtParticles(rearWheel.x, rearWheel.y, bikeVelocity, throttle, brake);
+                if (Math.random() < 0.3) {
+                    const frontWheel = points[1];
+                    spawnDirtParticles(frontWheel.x, frontWheel.y, bikeVelocity, throttle, brake);
+                }
+
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    const p = particles[i];
+                    p.x += p.vx * dt;
+                    p.y += p.vy * dt;
+                    p.life -= dt;
+                    p.vy += GRAVITY * dt * 0.3;
+                    if (p.life <= 0 || p.y > levelHeight + 100) {
+                        particles.splice(i, 1);
+                    }
+                }
+            }
+
+            // ---------- Camera, scoring, lap detection ----------
+            function updateGameStats(dt) {
+                if (gameState !== 'playing') return;
+
+                if (raceTimeRunning) {
+                    raceTime += dt * 1000;
+                }
+
+                cameraX = points[0].x - canvas.width * 0.4;
+                cameraX = Math.min(Math.max(0, cameraX), levelWidth - canvas.width);
+                if (levelWidth < canvas.width) cameraX = (levelWidth - canvas.width) / 2;
+
+                const midY = (points[0].y + points[1].y) / 2;
+                cameraY = midY - canvas.height * 0.6;
+                cameraY = Math.min(Math.max(0, cameraY), levelHeight - canvas.height);
+                if (levelHeight < canvas.height) cameraY = (levelHeight - canvas.height) / 2;
+
+                if (startProtection > 0) {
+                    startProtection -= dt;
+                } else {
+                    const headGround = getTerrainHeightAt(points[3].x);
+                    if (points[3].y > headGround + 25 || points[0].y > levelHeight + 100) {
+                        gameState = 'gameover';
+                        raceTimeRunning = false;
+                        finalRaceTime = raceTime;
+                        syncMusic(); // music pauses when leaving gameplay
+                        return;
+                    }
+                }
+
+                if (finishLineX === 0) finishLineX = levelWidth * 0.9;
+                const rearX = points[0].x;
+                if (!lapCrossed && rearX >= finishLineX) {
+                    lapCrossed = true;
+                    currentLap++;
+                    if (currentLap > TOTAL_LAPS) {
+                        gameState = 'win';
+                        raceTimeRunning = false;
+                        finalRaceTime = raceTime;
+                        syncMusic(); // music pauses on win
+                        return;
+                    }
+                } else if (lapCrossed && rearX < finishLineX) {
+                    lapCrossed = false;
+                }
+
+                updateTimerDisplay();
+                document.getElementById('lap').innerText = `LAP ${currentLap} / ${TOTAL_LAPS}`;
+                document.getElementById('speed-val').innerText = Math.floor(Math.abs(bikeVelocity) * 0.18);
+            }
+
+            function updateTimerDisplay() {
+                let totalSeconds = raceTime / 1000;
+                let minutes = Math.floor(totalSeconds / 60);
+                let seconds = Math.floor(totalSeconds % 60);
+                let centiseconds = Math.floor((raceTime % 1000) / 10);
+                const timerString = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${centiseconds.toString().padStart(2, '0')}`;
+                document.getElementById('timer').innerText = `TIME ${timerString}`;
+            }
+
+            function formatTime(ms) {
+                let totalSeconds = ms / 1000;
+                let minutes = Math.floor(totalSeconds / 60);
+                let seconds = Math.floor(totalSeconds % 60);
+                let centiseconds = Math.floor((ms % 1000) / 10);
+                return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${centiseconds.toString().padStart(2, '0')}`;
+            }
+
+            // ---------- Drawing utilities (all font stacks updated) ----------
+            function drawMinimap() {
+                if (gameState !== 'playing' && gameState !== 'paused') return;
+                if (!minimapTerrainPoints.length) return;
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+                ctx.fillRect(MINIMAP_X, MINIMAP_Y, MINIMAP_WIDTH, MINIMAP_HEIGHT);
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(MINIMAP_X, MINIMAP_Y, MINIMAP_WIDTH, MINIMAP_HEIGHT);
+                ctx.beginPath();
+                ctx.strokeStyle = '#8B4513';
+                ctx.lineWidth = 1.5;
+                const range = minimapMaxY - minimapMinY;
+                let first = true;
+                for (let i = 0; i < minimapTerrainPoints.length; i++) {
+                    const worldY = minimapTerrainPoints[i];
+                    const yRatio = (worldY - minimapMinY) / range;
+                    const clamped = Math.min(Math.max(yRatio, 0), 1);
+                    const screenY = MINIMAP_Y + MINIMAP_HEIGHT - (clamped * MINIMAP_HEIGHT);
+                    const x = MINIMAP_X + i;
+                    if (first) {
+                        ctx.moveTo(x, screenY);
+                        first = false;
+                    } else {
+                        ctx.lineTo(x, screenY);
+                    }
+                }
+                ctx.stroke();
+                const playerX = points[0]?.x || 0;
+                const dotX = MINIMAP_X + (playerX / levelWidth) * MINIMAP_WIDTH;
+                const clampedDotX = Math.min(Math.max(dotX, MINIMAP_X + 2), MINIMAP_X + MINIMAP_WIDTH - 2);
+                const dotY = MINIMAP_Y + MINIMAP_HEIGHT / 2;
+                ctx.fillStyle = '#f00';
+                ctx.beginPath();
+                ctx.arc(clampedDotX, dotY, 4, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.font = '10px Arial';
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'left';
+                ctx.fillText('MAP', MINIMAP_X, MINIMAP_Y - 2);
+            }
+
+            function drawSoundToggle() {
+                ctx.fillStyle = soundEnabled ? '#2ecc71' : '#e74c3c';
+                ctx.fillRect(SOUND_BTN_X, SOUND_BTN_Y, SOUND_BTN_W, SOUND_BTN_H);
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(SOUND_BTN_X, SOUND_BTN_Y, SOUND_BTN_W, SOUND_BTN_H);
+                ctx.font = 'bold 11px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(soundEnabled ? "🔊 ON" : "🔇 OFF", SOUND_BTN_X + SOUND_BTN_W / 2, SOUND_BTN_Y + SOUND_BTN_H / 2);
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'alphabetic';
+            }
+
+            function drawTickerBar() {
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(0, canvas.height - 28, canvas.width, 28);
+                ctx.clip();
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, canvas.height - 28, canvas.width, 28);
+                ctx.font = '14px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#ffffff';
+                ctx.textBaseline = 'middle';
+                ctx.textAlign = 'left';
+                if (tickerTextWidth === 0 && ctx) {
+                    tickerTextWidth = ctx.measureText(tickerMessage).width;
+                }
+                ctx.fillText(tickerMessage, tickerX, canvas.height - 14);
+                tickerX -= TICKER_SPEED;
+                if (tickerX + tickerTextWidth < 0) tickerX = canvas.width;
+                ctx.restore();
+            }
+
+            const tickerMessage = "Press Space to begin.  |  Use Arrow Keys to move.  |  Press P to pause.  |  Complete 3 laps to win!  |  TG Motocross 2 - HTML5 Edition  |  Good luck!";
+            let tickerX = canvas.width;
+            let tickerTextWidth = 0;
+            const TICKER_SPEED = 1.2;
+
+            // ---------- Menu, game over, win screens (fonts updated) ----------
+            function drawMenu() {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.font = 'bold 48px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#FF6600';
+                ctx.textAlign = 'center';
+                ctx.fillText('TG MOTOCROSS 2', canvas.width / 2, 100);
+                ctx.font = '18px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#ffffff';
+                ctx.fillText('HTML5 Edition', canvas.width / 2, 140);
+                if (subMenu === 'howto') drawHowToOverlay();
+                else if (subMenu === 'about') drawAboutOverlay();
+                else drawMenuButtons();
+                ctx.textAlign = 'left';
+            }
+
+            function drawMenuButtons() {
+                for (let i = 0; i < menuButtons.length; i++) {
+                    const btn = menuButtons[i];
+                    const isHover = (hoverIndex === i);
+                    ctx.fillStyle = isHover ? '#FF6600' : '#333333';
+                    ctx.fillRect(btnX, btn.y, btnWidth, btnHeight);
+                    ctx.strokeStyle = '#FF6600';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(btnX, btn.y, btnWidth, btnHeight);
+                    ctx.font = 'bold 18px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                    ctx.fillStyle = '#ffffff';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(btn.label, canvas.width / 2, btn.y + 28);
+                }
+            }
+
+            function drawHowToOverlay() {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.font = 'bold 32px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#FF6600';
+                ctx.fillText('HOW TO PLAY', canvas.width / 2, 100);
+                ctx.font = '20px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#fff';
+                ctx.fillText('Arrow Up: Accelerate', canvas.width / 2, 180);
+                ctx.fillText('Arrow Down: Brake', canvas.width / 2, 230);
+                ctx.fillText('Arrow Left / Right: Lean', canvas.width / 2, 280);
+                ctx.fillText('P: Pause', canvas.width / 2, 330);
+                ctx.fillText('Complete all 3 laps to win!', canvas.width / 2, 380);
+                ctx.font = 'bold 18px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#FF6600';
+                ctx.fillRect(canvas.width - 100, 20, 80, 40);
+                ctx.fillStyle = '#fff';
+                ctx.fillText('BACK', canvas.width - 60, 45);
+            }
+
+            function drawAboutOverlay() {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.font = 'bold 32px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#FF6600';
+                ctx.fillText('ABOUT', canvas.width / 2, 100);
+                ctx.font = '20px monospace';
+                ctx.fillStyle = '#fff';
+                ctx.fillText('Original game by Teagames Limited (2006)', canvas.width / 2, 180);
+                ctx.fillText('HTML5 Port', canvas.width / 2, 230);
+                ctx.font = 'bold 18px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#FF6600';
+                ctx.fillRect(canvas.width - 100, 20, 80, 40);
+                ctx.fillStyle = '#fff';
+                ctx.fillText('BACK', canvas.width - 60, 45);
+            }
+
+            function drawGameOver() {
+                if (gameState !== 'gameover') return;
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.font = 'bold 52px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#f33';
+                ctx.textAlign = 'center';
+                ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2 - 80);
+                ctx.font = '22px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#fff';
+                ctx.fillText(`Time: ${formatTime(finalRaceTime)}`, canvas.width / 2, canvas.height / 2 - 20);
+                for (let i = 0; i < gameOverButtons.length; i++) {
+                    const btn = gameOverButtons[i];
+                    const isHover = (hoverIndex === i);
+                    ctx.fillStyle = isHover ? '#FF6600' : '#333333';
+                    ctx.fillRect(btn.x, btn.y, btn.width, btn.height);
+                    ctx.strokeStyle = '#FF6600';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(btn.x, btn.y, btn.width, btn.height);
+                    ctx.font = 'bold 18px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                    ctx.fillStyle = '#fff';
+                    ctx.fillText(btn.label, btn.x + btn.width / 2, btn.y + 28);
+                }
+                ctx.textAlign = 'left';
+            }
+
+            function drawWin() {
+                if (gameState !== 'win') return;
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.font = 'bold 48px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#ffcc00';
+                ctx.textAlign = 'center';
+                ctx.fillText('STAGE COMPLETE!', canvas.width / 2, canvas.height / 2 - 80);
+                ctx.font = '22px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#fff';
+                ctx.fillText(`Time: ${formatTime(finalRaceTime)}`, canvas.width / 2, canvas.height / 2 - 20);
+                ctx.fillText(`Lap 3 / 3 Complete`, canvas.width / 2, canvas.height / 2 + 20);
+                for (let i = 0; i < winButtons.length; i++) {
+                    const btn = winButtons[i];
+                    const isHover = (hoverIndex === i);
+                    ctx.fillStyle = isHover ? '#FF6600' : '#333333';
+                    ctx.fillRect(btn.x, btn.y, btn.width, btn.height);
+                    ctx.strokeStyle = '#FF6600';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(btn.x, btn.y, btn.width, btn.height);
+                    ctx.font = 'bold 18px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                    ctx.fillStyle = '#fff';
+                    ctx.fillText(btn.label, btn.x + btn.width / 2, btn.y + 28);
+                }
+                ctx.textAlign = 'left';
+            }
+
+            // ---------- Existing game drawing (fonts updated to new stack) ----------
+            function drawTiles() {
+                if (!assets.tiles || !assets.tiles.complete) {
+                    ctx.fillStyle = '#8B5A2B';
+                    ctx.fillRect(0, canvas.height - 131, canvas.width, 131); // Lowered fallback too
+                    return;
+                }
+                const img = assets.tiles;
+                const tileW = 32, tileH = 32;
+                const colsPerRow = Math.floor(img.width / tileW);
+                const startCol = Math.max(0, Math.floor(cameraX / 16));
+                const endCol = Math.min(mapData[0].length - 1, Math.floor((cameraX + canvas.width) / 16) + 1);
+
+                const flatGroundY = levelHeight - 60;
+                const minVisibleY = flatGroundY - 20;
+
+                for (let row = 0; row < mapData.length; row++) {
+                    const tileTop = row * 32;
+                    if (tileTop + 32 < minVisibleY) continue;
+                    if (tileTop + 95 > cameraY + canvas.height || tileTop + 32 + 95 < cameraY) continue;
+
+                    for (let col = startCol; col <= endCol; col++) {
+                        const tileVal = mapData[row][col];
+                        if (!tileVal) continue;
+                        const imgIdx = tileVal & 0xFF;
+                        const sx = (imgIdx % colsPerRow) * tileW;
+                        const sy = Math.floor(imgIdx / colsPerRow) * tileH;
+                        const dx = col * 16 - cameraX;
+                        const dy = row * 32 - cameraY + 95;
+                        ctx.drawImage(img, sx, sy, tileW, tileH, dx, dy, tileW, tileH);
+                    }
+                }
+            }
+
+            function drawBike() {
+                if (!points.length) return;
+
+                const rear = points[0];
+                const front = points[1];
+                const bikeAngle = Math.atan2(front.y - rear.y, front.x - rear.x);
+                const midX = (rear.x + front.x) / 2 - cameraX;
+                const midY = (rear.y + front.y) / 2 - cameraY;
+
+                const w = assets.wheel;
+                const b = assets.body;
+                const t = assets.manTorso;
+                const h = assets.manHead;
+                const a = assets.manArm;
+                const fore = assets.manForearm;
+                const thigh = assets.manThigh;
+                const shin = assets.manShin;
+
+                // REAR WHEEL
+                ctx.save();
+                ctx.translate(rear.x - cameraX, rear.y - cameraY + PLAYER_VISUAL_OFFSET_Y);
+                ctx.rotate(wheelAngle);
+                if (w && w.complete && w.naturalWidth > 0)
+                    ctx.drawImage(w, -WHEEL_RADIUS, -WHEEL_RADIUS, WHEEL_RADIUS * 2, WHEEL_RADIUS * 2);
+                else {
+                    ctx.fillStyle = '#222';
+                    ctx.beginPath(); ctx.arc(0, 0, WHEEL_RADIUS, 0, Math.PI * 2); ctx.fill();
+                }
+                ctx.restore();
+
+                // FRONT WHEEL
+                ctx.save();
+                ctx.translate(front.x - cameraX, front.y - cameraY + PLAYER_VISUAL_OFFSET_Y);
+                ctx.rotate(wheelAngle);
+                if (w && w.complete && w.naturalWidth > 0)
+                    ctx.drawImage(w, -WHEEL_RADIUS, -WHEEL_RADIUS, WHEEL_RADIUS * 2, WHEEL_RADIUS * 2);
+                else {
+                    ctx.fillStyle = '#222';
+                    ctx.beginPath(); ctx.arc(0, 0, WHEEL_RADIUS, 0, Math.PI * 2); ctx.fill();
+                }
+                ctx.restore();
+
+                // BIKE & RIDER
+                ctx.save();
+                ctx.translate(midX, midY + PLAYER_VISUAL_OFFSET_Y);
+                ctx.rotate(bikeAngle);
+
+                // Back leg (behind body)
+                ctx.save();
+                ctx.rotate(bikeLeanAngle * 0.25);
+                ctx.save();
+                ctx.translate(6, -14);
+                ctx.rotate(1);
+                if (thigh && thigh.complete && thigh.naturalWidth > 0)
+                    ctx.drawImage(thigh, -8, 0, 16, 22);
+                else { ctx.fillStyle = '#27ae60'; ctx.fillRect(-8, 0, 16, 22); }
+                ctx.restore();
+                ctx.save();
+                ctx.translate(20, 10);
+                ctx.rotate(1);
+                if (shin && shin.complete && shin.naturalWidth > 0)
+                    ctx.drawImage(shin, -36, -4, 36, 22);
+                else { ctx.fillStyle = '#27ae60'; ctx.fillRect(-36, -4, 36, 22); }
+                ctx.restore();
+                ctx.restore();
+
+                // Bike body
+                if (b && b.complete && b.naturalWidth > 0)
+                    ctx.drawImage(b, -25, -18, 55, 32);
+                else { ctx.fillStyle = '#f90'; ctx.fillRect(-25, -18, 55, 32); }
+
+                // Rider
+                ctx.save();
+                ctx.rotate(bikeLeanAngle * 0.4);
+
+                ctx.save();
+                ctx.translate(5, -14);
+                ctx.rotate(1);
+                if (thigh && thigh.complete && thigh.naturalWidth > 0)
+                    ctx.drawImage(thigh, -8, 0, 16, 22);
+                else { ctx.fillStyle = '#27ae60'; ctx.fillRect(-8, 0, 16, 22); }
+                ctx.restore();
+
+                ctx.save();
+                ctx.translate(10, -10);
+                ctx.rotate(0.9);
+                if (shin && shin.complete && shin.naturalWidth > 0)
+                    ctx.drawImage(shin, 0, -4, 36, 22);
+                else { ctx.fillStyle = '#27ae60'; ctx.fillRect(0, -4, 36, 22); }
+                ctx.restore();
+
+                ctx.save();
+                ctx.translate(0, -18);
+                ctx.rotate(0.15);
+                if (t && t.complete && t.naturalWidth > 0)
+                    ctx.drawImage(t, -12, -30, 24, 30);
+                else { ctx.fillStyle = '#e8c49a'; ctx.fillRect(-12, -30, 24, 30); }
+                ctx.restore();
+
+                ctx.save();
+                ctx.translate(-4, -38);
+                ctx.rotate(-0.2);
+                if (a && a.complete && a.naturalWidth > 0)
+                    ctx.drawImage(a, -18, -5, 18, 10);
+                else { ctx.fillStyle = '#e8c49a'; ctx.fillRect(-18, -5, 18, 10); }
+                ctx.restore();
+
+                ctx.save();
+                ctx.translate(-20, -36);
+                ctx.rotate(0.4);
+                if (fore && fore.complete && fore.naturalWidth > 0)
+                    ctx.drawImage(fore, -16, -5, 16, 10);
+                else { ctx.fillStyle = '#e8c49a'; ctx.fillRect(-16, -5, 16, 10); }
+                ctx.restore();
+
+                ctx.save();
+                ctx.translate(6, -38);
+                ctx.rotate(0.5);
+                if (a && a.complete && a.naturalWidth > 0)
+                    ctx.drawImage(a, 0, -5, 18, 10);
+                else { ctx.fillStyle = '#e8c49a'; ctx.fillRect(0, -5, 18, 10); }
+                ctx.restore();
+
+                ctx.save();
+                ctx.translate(20, -32);
+                ctx.rotate(0.7);
+                if (fore && fore.complete && fore.naturalWidth > 0)
+                    ctx.drawImage(fore, 0, -5, 16, 10);
+                else { ctx.fillStyle = '#e8c49a'; ctx.fillRect(0, -5, 16, 10); }
+                ctx.restore();
+
+                ctx.save();
+                ctx.translate(2, -50);
+                ctx.rotate(1.5);
+                if (h && h.complete && h.naturalWidth > 0)
+                    ctx.drawImage(h, -11, -22, 22, 22);
+                else { ctx.fillStyle = '#3498db'; ctx.beginPath(); ctx.arc(0, -11, 11, 0, Math.PI * 2); ctx.fill(); }
+                ctx.restore();
+
+                ctx.restore(); // rider lean
+                ctx.restore(); // bike angle
+            }
+
+            function drawParticles() {
+                for (let p of particles) {
+                    const img = dirtImages[p.imgIndex];
+                    if (img && img.complete && img.naturalWidth > 0) {
+                        ctx.globalAlpha = Math.min(1, p.life * 2);
+                        ctx.drawImage(img, p.x - cameraX - p.size / 2, p.y - cameraY - p.size / 2 + PLAYER_VISUAL_OFFSET_Y, p.size, p.size);
+                        ctx.globalAlpha = 1;
+                    } else {
+                        ctx.fillStyle = `rgba(139, 69, 19, ${p.life * 0.5})`;
+                        ctx.beginPath();
+                        ctx.arc(p.x - cameraX, p.y - cameraY + PLAYER_VISUAL_OFFSET_Y, p.size / 2, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+            }
+
+            function drawFinishLine() {
+                if (gameState !== 'playing' && gameState !== 'paused') return;
+                const screenX = finishLineX - cameraX;
+                if (screenX < -10 || screenX > canvas.width + 10) return;
+
+                const squareSize = 8;
+                const flagHeight = 60;
+                const groundY = levelHeight - 60 - cameraY + PLAYER_VISUAL_OFFSET_Y;
+
+                for (let row = 0; row < flagHeight / squareSize; row++) {
+                    for (let col = 0; col < 2; col++) {
+                        const isDark = (row + col) % 2 === 0;
+                        ctx.fillStyle = isDark ? '#000' : '#fff';
+                        ctx.fillRect(
+                            screenX + col * squareSize - squareSize,
+                            groundY - flagHeight + row * squareSize,
+                            squareSize, squareSize
+                        );
+                    }
+                }
+
+                ctx.font = 'bold 13px Arial';
+                ctx.fillStyle = '#ffcc00';
+                ctx.textAlign = 'center';
+                ctx.fillText('FINISH', screenX, groundY - flagHeight - 6);
+                ctx.textAlign = 'left';
+            }
+
+            function drawPauseOverlay() {
+                if (gameState !== 'paused') return;
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.font = 'bold 42px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('PAUSED', canvas.width / 2, canvas.height / 2 - 30);
+                ctx.font = '20px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillStyle = '#ccc';
+                ctx.fillText('Press P to continue', canvas.width / 2, canvas.height / 2 + 30);
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'alphabetic';
+            }
+
+            function drawUI() {
+                debugDiv.innerText = `X:${Math.round(points[0]?.x || 0)} Y:${Math.round(points[0]?.y || 0)} Vel:${Math.round(bikeVelocity)} Lean:${bikeLeanAngle.toFixed(2)} Part:${particles.length}`;
+            }
+
+            // ---------- Level Init ----------
+            function initLevel(levelIdx) {
+                currentLevel = levelIdx;
+                mapData = window.tileMaps[currentLevel];
+                if (!mapData) { console.error("No map data"); return; }
+                const trackSize = window.trackSizes[currentLevel];
+                levelHeight = trackSize[0];
+                levelWidth = trackSize[1];
+                finishLineX = levelWidth * 0.9;
+
+                const startX = 150;
+                const startY = findSafeStartY(startX);
+                initBike(startX, startY);
+                cameraX = startX - canvas.width * 0.4;
+                cameraY = startY - canvas.height * 0.6;
+                bikeVelocity = 0;
+
+                raceTime = 0;
+                raceTimeRunning = true;
+                currentLap = 1;
+                currentStage = 1;
+                lapCrossed = false;
+                finalRaceTime = 0;
+
+                buildMinimapCache();
+                gameState = 'playing';
+                particles = [];
+                updateTimerDisplay();
+                document.getElementById('lap').innerText = `LAP ${currentLap} / ${TOTAL_LAPS}`;
+                document.getElementById('timer').style.display = 'block';
+                document.getElementById('lap').style.display = 'block';
+                document.getElementById('speedometer').style.display = 'block';
+
+                syncMusic(); // start music when level begins (if sound enabled)
+            }
+
+            function startGame() {
+                subMenu = null;
+                initLevel(0);
+            }
+
+            // ---------- Main Loop ----------
+            let lastTime = performance.now();
+            function gameLoop() {
+                const now = performance.now();
+                let dt = Math.min(0.033, (now - lastTime) / 1000);
+                if (dt < 0.001) dt = 0.016;
+                lastTime = now;
+
+                updatePhysics(dt);
+                updateGameStats(dt);
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                if (assets.bg && assets.bg.complete && assets.bg.naturalWidth > 0) {
+                    const bgW = assets.bg.width;
+                    const off = (cameraX * 0.3) % bgW;
+                    ctx.drawImage(assets.bg, -off, 0, canvas.width, canvas.height);
+                    ctx.drawImage(assets.bg, bgW - off, 0, canvas.width, canvas.height);
+                } else {
+                    ctx.fillStyle = '#2a3f5e';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                }
+
+                drawTiles();
+                drawFinishLine();
+                drawParticles();
+                drawBike();
+                drawUI();
+                drawPauseOverlay();
+                drawMinimap();
+
+                if (gameState === 'menu') drawMenu();
+                else if (gameState === 'gameover') drawGameOver();
+                else if (gameState === 'win') drawWin();
+
+                drawSoundToggle();
+                drawTickerBar();
+
+                requestAnimationFrame(gameLoop);
+            }
+
+            loadAssets();
+            for (let i = 0; i < dirtImages.length; i++) {
+                dirtImages[i].onload = () => { };
+            }
+            mapData = window.tileMaps[0];
+            if (mapData) {
+                const trackSize = window.trackSizes[0];
+                levelHeight = trackSize[0];
+                levelWidth = trackSize[1];
+                finishLineX = levelWidth * 0.9;
+                buildMinimapCache();
+            }
+            gameLoop();
+        })();
+    </script>
+</body>
+
+</html>
