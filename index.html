@@ -101,22 +101,57 @@
             const debugDiv = document.getElementById('debug');
 
             // ---------- Constants ----------
-            const GRAVITY = 800;
+            const GRAVITY = 1000;
             const WHEEL_RADIUS = 12;
-            const ACCEL = 260;
-            const BRAKE_FORCE = 400;
+            const ACCEL = 130;
+            const BRAKE_FORCE = 500;
             const LEAN_SPEED = 4.0;
             const MAX_LEAN = 0.65;
             const TOTAL_LAPS = 3;
-            const PLAYER_VISUAL_OFFSET_Y = 255;
 
             // ---------- World ----------
             let currentLevel = 0;
             let levelWidth = 0, levelHeight = 0;
             let mapData = null;
 
+            // ---------- Sine-wave terrain ----------
+            let terrainSamples = [];
+            const TERRAIN_SAMPLE_STEP = 4;
+
+            function generateSineTerrain() {
+                if (levelWidth <= 0) return;
+                const numSamples = Math.floor(levelWidth / TERRAIN_SAMPLE_STEP) + 1;
+                terrainSamples = new Array(numSamples);
+                const baseY = levelHeight * 0.58;
+                for (let i = 0; i < numSamples; i++) {
+                    const x = i * TERRAIN_SAMPLE_STEP;
+                    let y = baseY;
+                    y += Math.sin(x * 0.0028) * 52;
+                    y += Math.sin(x * 0.0065 + 1.3) * 36;
+                    y += Math.sin(x * 0.014 + 0.7) * 22;
+                    y += Math.sin(x * 0.029 + 2.1) * 13;
+                    y += Math.sin(x * 0.0009 + 0.4) * 28;
+                    y += Math.sin(x * 0.052 + 3.7) * 8;
+                    terrainSamples[i] = y;
+                }
+            }
+
+            function getTerrainHeightAt(x) {
+                if (terrainSamples.length === 0) return levelHeight * 0.58;
+                const wrappedX = ((x % levelWidth) + levelWidth) % levelWidth;
+                const idx = wrappedX / TERRAIN_SAMPLE_STEP;
+                const i0 = Math.floor(idx);
+                const i1 = (i0 + 1) % terrainSamples.length;
+                const t = idx - i0;
+                const y0 = terrainSamples[i0];
+                const y1 = terrainSamples[i1];
+                return y0 + (y1 - y0) * t;
+            }
+
+
+
             // ---------- Game State ----------
-            let gameState = 'menu';        // 'menu', 'playing', 'paused', 'gameover', 'win'
+            let gameState = 'menu';
             let subMenu = null;
             let startProtection = 1.0;
             let finalRaceTime = 0;
@@ -147,14 +182,7 @@
                 dirtImages.push(img);
             }
 
-            // ---------- Minimap cache ----------
-            const MINIMAP_WIDTH = 140;
-            const MINIMAP_HEIGHT = 45;
-            const MINIMAP_X = canvas.width - 150;
-            const MINIMAP_Y = 10;
-            let minimapTerrainPoints = [];
-            let minimapMinY = 0;
-            let minimapMaxY = 0;
+
 
             // ---------- Sound Toggle ----------
             let soundEnabled = true;
@@ -167,6 +195,9 @@
             const bgMusic = new Audio('music/mondamusic-retro-arcade-game-music-512837.mp3');
             bgMusic.loop = true;
             bgMusic.volume = 1.0;
+
+            // ---------- Lap completion tracking ----------
+            let lapCompleted = [false, false, false];   // index 0 = lap1, 1 = lap2, 2 = lap3
 
             function syncMusic() {
                 const shouldPlay = (gameState === 'playing' || gameState === 'paused') && soundEnabled;
@@ -181,7 +212,7 @@
             const assets = {};
             const assetPaths = {
                 tiles: 'assets/tiles.png',
-                wheel: 'assets/sprites/wheel/1.png',
+                wheel: 'assets/sprites/wheel/wheel_tire.png',
                 body: 'assets/sprites/bikeBody/1.png',
                 backShaft: 'assets/sprites/bikeBackShaft/1.png',
                 frontShockBase: 'assets/sprites/bikeFrontShockBase/1.png',
@@ -335,83 +366,10 @@
                 initLevel(0);
             }
 
-            // ---------- Terrain ----------
-            function getTerrainHeightAt(x) {
-                if (!mapData) return 10000;
-                const colStep = 16;
-                const wrappedX = ((x % levelWidth) + levelWidth) % levelWidth;
-                const col = Math.floor(wrappedX / colStep);
-                if (col < 0 || col >= mapData[0].length) return 10000;
-
-                let bestGroundY = 10000;
-                for (let c = Math.max(0, col - 1); c <= Math.min(col + 1, mapData[0].length - 1); c++) {
-                    const relX = wrappedX - c * colStep;
-                    if (relX < -1 || relX > colStep + 1) continue;
-                    const clampedRelX = Math.max(0, Math.min(colStep, relX));
-                    for (let row = 0; row < mapData.length; row++) {
-                        const tileVal = mapData[row][c];
-                        if (!tileVal) continue;
-                        const segIndex = tileVal >> 8;
-                        const segments = window.F9Fe[segIndex];
-                        if (!segments || segments.length === 0) continue;
-                        const tileWorldY = row * 32;
-                        for (let i = 0; i < segments.length; i += 5) {
-                            const x1 = segments[i];
-                            const y1 = segments[i + 1];
-                            const x2 = segments[i + 2];
-                            const y2 = segments[i + 3];
-                            const minX = Math.min(x1, x2);
-                            const maxX = Math.max(x1, x2);
-                            if (clampedRelX < minX - 0.5 || clampedRelX > maxX + 0.5) continue;
-                            let segY;
-                            if (Math.abs(x2 - x1) < 0.5) segY = Math.min(y1, y2);
-                            else {
-                                const t = (clampedRelX - x1) / (x2 - x1);
-                                segY = y1 + t * (y2 - y1);
-                            }
-                            const worldY = tileWorldY + segY;
-                            if (worldY < bestGroundY) bestGroundY = worldY;
-                        }
-                    }
-                }
-                if (bestGroundY === 10000) {
-                    for (let row = 0; row < mapData.length; row++) {
-                        if (mapData[row][col]) {
-                            bestGroundY = row * 32;
-                            break;
-                        }
-                    }
-                }
-                return bestGroundY;
-            }
-
+            // ---------- Terrain helpers ----------
             function findSafeStartY(x) {
                 let groundY = getTerrainHeightAt(x);
-                if (groundY < 10000) return groundY - WHEEL_RADIUS - 10;
-                return levelHeight - 80;
-            }
-
-            function buildMinimapCache() {
-                if (!mapData) return;
-                const stepX = levelWidth / MINIMAP_WIDTH;
-                minimapTerrainPoints = [];
-                let minY = Infinity, maxY = -Infinity;
-                for (let i = 0; i <= MINIMAP_WIDTH; i++) {
-                    const worldX = i * stepX;
-                    let worldY = getTerrainHeightAt(worldX);
-                    if (worldY > 10000) worldY = levelHeight - 50;
-                    minimapTerrainPoints.push(worldY);
-                    if (worldY < minY) minY = worldY;
-                    if (worldY > maxY) maxY = worldY;
-                }
-                const range = maxY - minY;
-                if (range < 20) {
-                    minimapMinY = minY - 10;
-                    minimapMaxY = maxY + 10;
-                } else {
-                    minimapMinY = minY;
-                    minimapMaxY = maxY;
-                }
+                return groundY - WHEEL_RADIUS - 10;
             }
 
             // ---------- Bike geometry ----------
@@ -468,24 +426,27 @@
             }
 
             // ---------- Physics ----------
+            // ---------- Physics ----------
             function updatePhysics(dt) {
                 if (gameState !== 'playing') return;
 
                 const throttle = keys['ArrowUp'];
                 const brake = keys['ArrowDown'];
 
+                // ---- Global engine speed (for rear wheel drive) ----
                 if (throttle) bikeVelocity += ACCEL * dt;
-                if (brake) bikeVelocity -= BRAKE_FORCE * dt;
-                bikeVelocity *= (1.0 - 0.70 * dt);
-                bikeVelocity = Math.min(450, Math.max(-150, bikeVelocity));
+                if (brake) bikeVelocity -= BRAKE_FORCE * dt;   // also reduces engine speed
+                bikeVelocity *= (1.0 - 0.9 * dt);
+                bikeVelocity = Math.min(55, Math.max(-150, bikeVelocity));
 
+                // ---- Lean control (unchanged) ----
                 if (keys['ArrowLeft']) targetLean = -1;
                 else if (keys['ArrowRight']) targetLean = 1;
                 else targetLean = 0;
                 bikeLeanAngle += (targetLean * MAX_LEAN - bikeLeanAngle) * (LEAN_SPEED * dt);
                 bikeLeanAngle = Math.max(-MAX_LEAN, Math.min(MAX_LEAN, bikeLeanAngle));
 
-                // Verlet integration - only non-wheel points get gravity freely
+                // ---- Verlet integration (gravity on all points, as before) ----
                 for (let i = 0; i < points.length; i++) {
                     const p = points[i];
                     const pv = prevPoints[i];
@@ -497,16 +458,35 @@
                     p.y += vy + GRAVITY * dt * dt;
                 }
 
-                // Drive force on wheels only
+                // ---- Drive force: rear wheel only (points[0]) ----
                 const axleAngle = Math.atan2(points[1].y - points[0].y, points[1].x - points[0].x);
                 const speedFactor = Math.min(1.0, Math.abs(bikeVelocity) / 200);
                 const steerAngle = axleAngle + bikeLeanAngle * 0.25 * speedFactor;
                 const driveX = bikeVelocity * dt * Math.cos(steerAngle);
-                const driveY = bikeVelocity * dt * Math.sin(steerAngle) * 0.0;
-                points[0].x += driveX; points[0].y += driveY;
-                points[1].x += driveX; points[1].y += driveY;
+                const driveY = bikeVelocity * dt * Math.sin(steerAngle) * 0.0;   // keep vertical drive zero to avoid artificial lift
 
-                // Constraint solver
+                points[0].x += driveX;
+                points[0].y += driveY;
+                // Front wheel gets NO drive force
+
+                // ---- Front‑wheel braking (impulse opposite to its motion) ----
+                if (brake) {
+                    const f = points[1];
+                    const fv = prevPoints[1];
+                    const fVelX = f.x - fv.x;   // raw velocity (dt cancels out)
+                    const fVelY = f.y - fv.y;
+                    const fSpeed = Math.hypot(fVelX, fVelY);
+                    if (fSpeed > 0.001) {
+                        const brakeStrength = 0.25;   // fraction of speed removed per frame
+                        const normX = fVelX / fSpeed;
+                        const normY = fVelY / fSpeed;
+                        // Adjust previous position to reduce velocity
+                        prevPoints[1].x += normX * fSpeed * brakeStrength;
+                        prevPoints[1].y += normY * fSpeed * brakeStrength;
+                    }
+                }
+
+                // ---- Constraint solver (unchanged) ----
                 for (let iter = 0; iter < 12; iter++) {
                     for (let c of constraints) {
                         const p1 = points[c.p1];
@@ -517,14 +497,12 @@
                         if (d < 0.001) continue;
                         const corr = (c.rest - d) / d * c.stiff * 0.5;
 
-                        // If either point is a wheel (0 or 1) and it's on ground,
-                        // only apply horizontal correction, never vertical
                         const p1IsWheel = (c.p1 === 0 || c.p1 === 1);
                         const p2IsWheel = (c.p2 === 0 || c.p2 === 1);
 
                         if (p1IsWheel) {
                             p1.x -= dx * corr;
-                            // p1.y unchanged — locked to ground
+                            // p1.y unchanged for wheels (kept on ground)
                         } else {
                             p1.x -= dx * corr;
                             p1.y -= dy * corr;
@@ -532,26 +510,38 @@
 
                         if (p2IsWheel) {
                             p2.x += dx * corr;
-                            // p2.y unchanged — locked to ground
+                            // p2.y unchanged
                         } else {
                             p2.x += dx * corr;
                             p2.y += dy * corr;
                         }
                     }
 
-                    // Ground collision per wheel — snap and kill velocity
+                    // ---- Smooth ground collision (vertical snap only, keep horizontal momentum) ----
                     for (let idx of [0, 1]) {
                         const p = points[idx];
                         const pv = prevPoints[idx];
-                        let gY = getTerrainHeightAt(p.x);
-                        if (gY < 10000 && p.y + WHEEL_RADIUS > gY) {
+                        const gY = getTerrainHeightAt(p.x);
+
+                        if (p.y + WHEEL_RADIUS > gY) {
+                            // Push wheel up to surface
                             p.y = gY - WHEEL_RADIUS;
+                            // Kill only vertical velocity (prevents bounce)
                             pv.y = p.y;
-                            pv.x = p.x; // Also kill horizontal springiness
+                            // Leave pv.x untouched → natural horizontal rolling/sliding
+
+                            // Apply mild friction when on ground (reduces horizontal speed)
+                            const contactMargin = 4;   // also apply when very close
+                            if (p.y + WHEEL_RADIUS <= gY + contactMargin) {
+                                const horizDiff = p.x - pv.x;
+                                const friction = 0.96;   // how much horizontal speed remains each frame
+                                pv.x = p.x - horizDiff * friction;
+                            }
                         }
                     }
                 }
-                // Lean body points around midpoint
+
+                // ---- Lean body points (unchanged) ----
                 const midX = (points[0].x + points[1].x) * 0.5;
                 const midY = (points[0].y + points[1].y) * 0.5;
                 for (let i = 2; i < points.length; i++) {
@@ -571,11 +561,12 @@
                     p.y = newY;
                 }
 
-                // World bounds
+                // ---- World bounds (unchanged) ----
                 for (let idx of [0, 1]) {
                     if (points[idx].x < 30) points[idx].x = 30;
                 }
 
+                // ---- Wheel rotation & particles (unchanged) ----
                 wheelAngle += bikeVelocity * dt * 0.5;
 
                 const rearWheel = points[0];
@@ -631,6 +622,10 @@
 
                 if (rearX >= nextFinishLineX) {
                     finishLinesCrossed++;
+                    // Mark the lap that was just completed as finished
+                    if (finishLinesCrossed <= TOTAL_LAPS) {
+                        lapCompleted[finishLinesCrossed - 1] = true;
+                    }
                     currentLap = finishLinesCrossed + 1;
 
                     if (currentLap > TOTAL_LAPS) {
@@ -647,11 +642,9 @@
                 document.getElementById('speed-val').innerText = Math.floor(Math.abs(bikeVelocity) * 0.18);
             }
 
-            // Teleport bike to the starting area, preserve current speed
             function teleportToStart() {
                 const startX = 150;
                 const startY = findSafeStartY(startX);
-                // Shift all bike points horizontally and vertically
                 const dx = startX - points[0].x;
                 const dy = startY - points[0].y;
                 for (let p of points) {
@@ -662,11 +655,9 @@
                     prevPoints[i].x += dx;
                     prevPoints[i].y += dy;
                 }
-                // Immediately snap camera to follow
                 cameraX = startX - canvas.width * 0.4;
                 cameraX = Math.min(Math.max(0, cameraX), levelWidth - canvas.width);
                 if (levelWidth < canvas.width) cameraX = (levelWidth - canvas.width) / 2;
-                // Reset lap crossing flag
                 lapCrossed = false;
             }
 
@@ -687,48 +678,6 @@
                 return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${centiseconds.toString().padStart(2, '0')}`;
             }
 
-            // ---------- Drawing utilities ----------
-            function drawMinimap() {
-                if (gameState !== 'playing' && gameState !== 'paused') return;
-                if (!minimapTerrainPoints.length) return;
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
-                ctx.fillRect(MINIMAP_X, MINIMAP_Y, MINIMAP_WIDTH, MINIMAP_HEIGHT);
-                ctx.strokeStyle = '#fff';
-                ctx.lineWidth = 1;
-                ctx.strokeRect(MINIMAP_X, MINIMAP_Y, MINIMAP_WIDTH, MINIMAP_HEIGHT);
-                ctx.beginPath();
-                ctx.strokeStyle = '#8B4513';
-                ctx.lineWidth = 1.5;
-                const range = minimapMaxY - minimapMinY;
-                let first = true;
-                for (let i = 0; i < minimapTerrainPoints.length; i++) {
-                    const worldY = minimapTerrainPoints[i];
-                    const yRatio = (worldY - minimapMinY) / range;
-                    const clamped = Math.min(Math.max(yRatio, 0), 1);
-                    const screenY = MINIMAP_Y + MINIMAP_HEIGHT - (clamped * MINIMAP_HEIGHT);
-                    const x = MINIMAP_X + i;
-                    if (first) {
-                        ctx.moveTo(x, screenY);
-                        first = false;
-                    } else {
-                        ctx.lineTo(x, screenY);
-                    }
-                }
-                ctx.stroke();
-                const playerX = points[0]?.x || 0;
-                const wrappedPlayerX = ((playerX % levelWidth) + levelWidth) % levelWidth;
-                const dotX = MINIMAP_X + (wrappedPlayerX / levelWidth) * MINIMAP_WIDTH;
-                const clampedDotX = Math.min(Math.max(dotX, MINIMAP_X + 2), MINIMAP_X + MINIMAP_WIDTH - 2);
-                const dotY = MINIMAP_Y + MINIMAP_HEIGHT / 2;
-                ctx.fillStyle = '#f00';
-                ctx.beginPath();
-                ctx.arc(clampedDotX, dotY, 4, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.font = '10px Arial';
-                ctx.fillStyle = '#fff';
-                ctx.textAlign = 'left';
-                ctx.fillText('MAP', MINIMAP_X, MINIMAP_Y - 2);
-            }
 
             function drawSoundToggle() {
                 ctx.fillStyle = soundEnabled ? '#2ecc71' : '#e74c3c';
@@ -892,115 +841,208 @@
                 }
                 ctx.textAlign = 'left';
             }
-
-            // ---------- Game drawing ----------
-            function drawTiles() {
-                if (!assets.tiles || !assets.tiles.complete) {
+            function drawTerrain() {
+                if (terrainSamples.length === 0) {
                     ctx.fillStyle = '#8B5A2B';
-                    ctx.fillRect(0, canvas.height - 131, canvas.width, 131);
+                    ctx.fillRect(0, canvas.height - 100, canvas.width, 100);
                     return;
                 }
-                const img = assets.tiles;
-                const tileW = 32, tileH = 32;
-                const colsPerRow = Math.floor(img.width / tileW);
-                const startCol = Math.floor(cameraX / 16);
-                const endCol = Math.floor((cameraX + canvas.width) / 16) + 1;
-                const flatGroundY = levelHeight - 60;
-                const minVisibleY = flatGroundY - 20;
+                const startWorldX = cameraX;
+                const step = 2;
 
-                for (let row = 0; row < mapData.length; row++) {
-                    const tileTop = row * 32;
-                    if (tileTop + 32 < minVisibleY) continue;
-                    if (tileTop + 95 > cameraY + canvas.height || tileTop + 32 + 95 < cameraY) continue;
-                    for (let col = startCol; col <= endCol; col++) {
-                        const wrappedCol = ((col % mapData[0].length) + mapData[0].length) % mapData[0].length;
-                        const tileVal = mapData[row][wrappedCol];
-                        if (!tileVal) continue;
-                        const imgIdx = tileVal & 0xFF;
-                        const sx = (imgIdx % colsPerRow) * tileW;
-                        const sy = Math.floor(imgIdx / colsPerRow) * tileH;
-                        const dx = col * 16 - cameraX;
-                        const dy = row * 32 - cameraY + 95;
-                        ctx.drawImage(img, sx, sy, tileW, tileH, dx, dy, tileW, tileH);
+                // Draw dirt fill below terrain surface
+                ctx.fillStyle = '#6B3A2A';
+                ctx.beginPath();
+                ctx.moveTo(0, canvas.height);
+                for (let sx = 0; sx <= canvas.width; sx += step) {
+                    const worldX = startWorldX + sx;
+                    const terrainY = getTerrainHeightAt(worldX);
+                    const screenY = terrainY - cameraY;
+                    ctx.lineTo(sx, screenY);
+                }
+                ctx.lineTo(canvas.width, canvas.height);
+                ctx.closePath();
+                ctx.fill();
+
+                // Darker sub‑surface layer
+                ctx.fillStyle = '#4a2518';
+                ctx.beginPath();
+                ctx.moveTo(0, canvas.height);
+                for (let sx = 0; sx <= canvas.width; sx += step) {
+                    const worldX = startWorldX + sx;
+                    const terrainY = getTerrainHeightAt(worldX) + 18;
+                    const screenY = terrainY - cameraY;
+                    ctx.lineTo(sx, screenY);
+                }
+                ctx.lineTo(canvas.width, canvas.height);
+                ctx.closePath();
+                ctx.fill();
+
+                // ---------- Underground stones (pebbles) ----------
+                const stoneStartX = Math.floor(startWorldX / 20) * 20;   // align to a grid
+                const stoneEndX = startWorldX + canvas.width + 20;
+                ctx.fillStyle = '#5a5a5a';   // grey stones
+                for (let wx = stoneStartX; wx <= stoneEndX; wx += 20) {
+                    // Deterministic pseudo‑random based on world X
+                    const hash = (wx * 0x9e3779b9) >>> 0;
+                    const placeStone = (hash % 100) < 35;   // ~35% chance of a stone at this column
+                    if (!placeStone) continue;
+
+                    const terrainY = getTerrainHeightAt(wx);
+                    // Stones appear a little below the surface
+                    const stoneY = terrainY + 8 + (hash % 40);   // 8‑48 px below grass
+                    const screenY = stoneY - cameraY;
+                    if (screenY < -10 || screenY > canvas.height + 10) continue;
+
+                    const size = 2 + (hash % 5);   // 2‑6 px radius
+                    ctx.beginPath();
+                    ctx.ellipse(wx - startWorldX, screenY, size, size * 0.7, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // Grass line on top (unchanged)
+                ctx.strokeStyle = '#3d7a28';
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                let firstPoint = true;
+                for (let sx = 0; sx <= canvas.width; sx += step) {
+                    const worldX = startWorldX + sx;
+                    const terrainY = getTerrainHeightAt(worldX);
+                    const screenY = terrainY - cameraY;
+                    if (firstPoint) {
+                        ctx.moveTo(sx, screenY);
+                        firstPoint = false;
+                    } else {
+                        ctx.lineTo(sx, screenY);
                     }
                 }
-            }
+                ctx.stroke();
 
+                // Highlight edge (unchanged)
+                ctx.strokeStyle = '#5a9e3a';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                firstPoint = true;
+                for (let sx = 0; sx <= canvas.width; sx += step) {
+                    const worldX = startWorldX + sx;
+                    const terrainY = getTerrainHeightAt(worldX) - 1;
+                    const screenY = terrainY - cameraY;
+                    if (firstPoint) {
+                        ctx.moveTo(sx, screenY);
+                        firstPoint = false;
+                    } else {
+                        ctx.lineTo(sx, screenY);
+                    }
+                }
+                ctx.stroke();
+                ctx.lineWidth = 1;
+            }
             function drawBike() {
                 if (!points.length) return;
+
                 const rear = points[0];
                 const front = points[1];
                 const bikeAngle = Math.atan2(front.y - rear.y, front.x - rear.x);
-                const midX = (rear.x + front.x) / 2 - cameraX;
-                const midY = (rear.y + front.y) / 2 - cameraY;
 
-                const w = assets.wheel;
-                const b = assets.body;
+                // World positions → screen positions
+                const rsx = rear.x - cameraX;
+                const rsy = rear.y - cameraY;
+                const fsx = front.x - cameraX;
+                const fsy = front.y - cameraY;
+                const midX = (rsx + fsx) / 2;
+                const midY = (rsy + fsy) / 2;
 
-                // Rear wheel
+                const wheelImg = assets.wheel;           // wheel_tire.png
+                const bikeRiderImg = assets.rider;       // rider.png
+                const wheelSize = 32;                    // drawn size of the wheel
+                const wheelPivot = wheelSize / 2;
+                const compression = Math.min(6, Math.abs(bikeVelocity) * 0.01); // fork compression
+
+                // ============================================================
+                // INDEPENDENT IMAGE CONTROLS — tweak these values
+                // ============================================================
+
+                // --- RIDER / FRAME image controls ---
+                const riderOffsetX = 0;          // horizontal shift (left/right from midpoint)
+                const riderOffsetY = 15;         // vertical shift (up/down from midpoint)
+                const riderRotation = 0;         // extra rotation in radians (added to bike angle)
+                const riderDrawWidth = 84;       // width in pixels
+                const riderPivotX = 0.5;         // horizontal pivot (0 = left, 0.5 = center, 1 = right)
+                const riderPivotY = 1.0;         // vertical pivot (0 = top, 1.0 = bottom)
+
+                // --- WHEEL image controls ---
+                const wheelOffsetX = 0;          // horizontal shift from wheel center
+                const wheelOffsetY = 0;          // vertical shift from wheel center
+                const wheelRotation = 0;         // extra rotation in radians (added to wheelAngle)
+                // wheelDrawSize is already set by `wheelSize` above
+
+                // ============================================================
+
+                // --- 1. Rear wheel (drawn behind the bike) ---
                 ctx.save();
-                ctx.translate(rear.x - cameraX, rear.y - cameraY + PLAYER_VISUAL_OFFSET_Y);
-                ctx.rotate(wheelAngle);
-                if (w && w.complete && w.naturalWidth > 0)
-                    ctx.drawImage(w, -WHEEL_RADIUS, -WHEEL_RADIUS, WHEEL_RADIUS * 2, WHEEL_RADIUS * 2);
-                else {
-                    ctx.fillStyle = '#222';
-                    ctx.beginPath(); ctx.arc(0, 0, WHEEL_RADIUS, 0, Math.PI * 2); ctx.fill();
-                }
-                ctx.restore();
-
-                // Front wheel
-                ctx.save();
-                ctx.translate(front.x - cameraX, front.y - cameraY + PLAYER_VISUAL_OFFSET_Y);
-                ctx.rotate(wheelAngle);
-                if (w && w.complete && w.naturalWidth > 0)
-                    ctx.drawImage(w, -WHEEL_RADIUS, -WHEEL_RADIUS, WHEEL_RADIUS * 2, WHEEL_RADIUS * 2);
-                else {
-                    ctx.fillStyle = '#222';
-                    ctx.beginPath(); ctx.arc(0, 0, WHEEL_RADIUS, 0, Math.PI * 2); ctx.fill();
-                }
-                ctx.restore();
-
-                // Bike body + rider in the bike's rotated coordinate system
-                ctx.save();
-                ctx.translate(midX, midY + PLAYER_VISUAL_OFFSET_Y);
-                ctx.rotate(bikeAngle);
-
-                // Bike body
-                if (b && b.complete && b.naturalWidth > 0)
-                    ctx.drawImage(b, -25, -18, 55, 32);
-                else { ctx.fillStyle = '#f90'; ctx.fillRect(20, -18, 55, 32); }
-
-                // ---- Rider (single PNG) ----
-                ctx.save();
-                ctx.rotate(bikeLeanAngle * 0.4);   // lean with the bike
-
-                if (assets.rider && assets.rider.complete && assets.rider.naturalWidth > 0) {
-                    // Adjust these four numbers (X, Y, width, height) so the rider sits perfectly.
-                    // The bike seat is at (0, -18).  The numbers below are a good starting point.
-                    ctx.drawImage(assets.rider, -30, -50, 60, 80);
+                ctx.translate(rsx, rsy);
+                ctx.rotate(wheelAngle + wheelRotation);
+                ctx.translate(wheelOffsetX, wheelOffsetY); // apply offset after rotation so it's relative
+                if (wheelImg && wheelImg.complete && wheelImg.naturalWidth > 0) {
+                    ctx.drawImage(wheelImg, -wheelPivot, -wheelPivot, wheelSize, wheelSize);
                 } else {
-                    // Fallback – simple placeholder until the image loads (remove later if you like)
-                    ctx.fillStyle = '#e8c49a';
-                    ctx.fillRect(-12, -50, 24, 50);
-                    ctx.fillStyle = '#3498db';
-                    ctx.beginPath(); ctx.arc(0, -50, 11, 0, Math.PI * 2); ctx.fill();
+                    ctx.fillStyle = '#222';
+                    ctx.beginPath();
+                    ctx.arc(0, 0, WHEEL_RADIUS, 0, Math.PI * 2);
+                    ctx.fill();
                 }
+                ctx.restore();
 
-                ctx.restore();   // end rider lean
-                ctx.restore();   // end bike rotation
+                // --- 2. Rider + bike frame (between wheels) ---
+                ctx.save();
+                ctx.translate(midX + riderOffsetX, midY + riderOffsetY);
+                ctx.rotate(bikeAngle + bikeLeanAngle * 0.4 + riderRotation);
+
+                if (bikeRiderImg && bikeRiderImg.complete && bikeRiderImg.naturalWidth > 0) {
+                    const imgW = bikeRiderImg.naturalWidth;
+                    const imgH = bikeRiderImg.naturalHeight;
+
+                    const drawWidth = riderDrawWidth;
+                    const drawHeight = (imgH / imgW) * drawWidth;
+
+                    // Calculate pivot point based on ratios
+                    const pivotX = drawWidth * riderPivotX;
+                    const pivotY = drawHeight * riderPivotY;
+
+                    ctx.drawImage(bikeRiderImg, -pivotX, -pivotY, drawWidth, drawHeight);
+                } else {
+                    // Fallback – placeholder rectangle so the game never breaks
+                    ctx.fillStyle = '#3498db';
+                    ctx.fillRect(-42, -50, 84, 50);
+                }
+                ctx.restore();
+
+                // --- 3. Front wheel (drawn in front, with fork compression) ---
+                ctx.save();
+                ctx.translate(fsx, fsy - compression);
+                ctx.rotate(wheelAngle + wheelRotation);
+                ctx.translate(wheelOffsetX, wheelOffsetY); // apply offset after rotation so it's relative
+                if (wheelImg && wheelImg.complete && wheelImg.naturalWidth > 0) {
+                    ctx.drawImage(wheelImg, -wheelPivot, -wheelPivot, wheelSize, wheelSize);
+                } else {
+                    ctx.fillStyle = '#222';
+                    ctx.beginPath();
+                    ctx.arc(0, 0, WHEEL_RADIUS, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
             }
             function drawParticles() {
                 for (let p of particles) {
                     const img = dirtImages[p.imgIndex];
                     if (img && img.complete && img.naturalWidth > 0) {
                         ctx.globalAlpha = Math.min(1, p.life * 2);
-                        ctx.drawImage(img, p.x - cameraX - p.size / 2, p.y - cameraY - p.size / 2 + PLAYER_VISUAL_OFFSET_Y, p.size, p.size);
+                        ctx.drawImage(img, p.x - cameraX - p.size / 2, p.y - cameraY - p.size / 2, p.size, p.size);
                         ctx.globalAlpha = 1;
                     } else {
                         ctx.fillStyle = `rgba(139, 69, 19, ${p.life * 0.5})`;
                         ctx.beginPath();
-                        ctx.arc(p.x - cameraX, p.y - cameraY + PLAYER_VISUAL_OFFSET_Y, p.size / 2, 0, Math.PI * 2);
+                        ctx.arc(p.x - cameraX, p.y - cameraY, p.size / 2, 0, Math.PI * 2);
                         ctx.fill();
                     }
                 }
@@ -1010,7 +1052,8 @@
                 if (gameState !== 'playing' && gameState !== 'paused') return;
                 const squareSize = 8;
                 const flagHeight = 60;
-                const groundY = levelHeight - 60 - cameraY + PLAYER_VISUAL_OFFSET_Y;
+                const finishTerrainY = getTerrainHeightAt(finishLineX);
+                const groundY = finishTerrainY - cameraY;
 
                 const startLap = Math.max(0, Math.floor((cameraX - 20) / levelWidth));
                 const endLap = Math.floor((cameraX + canvas.width + 20) / levelWidth);
@@ -1019,6 +1062,19 @@
                     const screenX = (lap * levelWidth + finishLineX) - cameraX;
                     if (screenX < -10 || screenX > canvas.width + 10) continue;
 
+                    // Determine which lap this line instance belongs to (0‑based)
+                    const lapIndex = lap % TOTAL_LAPS;   // 0 = lap1, 1 = lap2, 2 = lap3
+                    const isCompleted = lapIndex < finishLinesCrossed;  // already crossed?
+
+                    // Set text and colour
+                    let label;
+                    if (lapIndex === 0) label = 'LAP1';
+                    else if (lapIndex === 1) label = 'LAP2';
+                    else label = 'FINISH';
+
+                    const textColor = isCompleted ? '#2ecc71' : '#ffffff';   // green if done, else white
+
+                    // Draw the checkerboard flags (unchanged)
                     for (let row = 0; row < flagHeight / squareSize; row++) {
                         for (let col = 0; col < 2; col++) {
                             const isDark = (row + col) % 2 === 0;
@@ -1030,14 +1086,19 @@
                             );
                         }
                     }
-                    ctx.font = 'bold 13px Arial';
-                    ctx.fillStyle = '#ffcc00';
-                    ctx.textAlign = 'center';
-                    ctx.fillText('FINISH', screenX, groundY - flagHeight - 6);
-                    ctx.textAlign = 'left';
-                }
-            }
 
+                    // Draw the label
+                    ctx.font = 'bold 13px Arial';
+                    ctx.fillStyle = textColor;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'bottom';
+                    ctx.fillText(label, screenX, groundY - flagHeight - 6);
+                }
+
+                // Reset alignment (good practice)
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'alphabetic';
+            }
             function drawPauseOverlay() {
                 if (gameState !== 'paused') return;
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
@@ -1061,12 +1122,18 @@
             // ---------- Level Init ----------
             function initLevel(levelIdx) {
                 currentLevel = levelIdx;
-                mapData = window.tileMaps[currentLevel];
-                if (!mapData) { console.error("No map data"); return; }
-                const trackSize = window.trackSizes[currentLevel];
-                levelHeight = trackSize[0];
-                levelWidth = trackSize[1];
+                mapData = (window.tileMaps && window.tileMaps[currentLevel]) ? window.tileMaps[currentLevel] : null;
+                if (window.trackSizes && window.trackSizes[currentLevel]) {
+                    levelHeight = window.trackSizes[currentLevel][0];
+                    levelWidth = window.trackSizes[currentLevel][1];
+                } else {
+                    levelHeight = 800;
+                    levelWidth = 6000;
+                }
                 finishLineX = levelWidth * 0.9;
+
+                // Generate procedural sine-wave terrain
+                generateSineTerrain();
 
                 const startX = 150;
                 const startY = findSafeStartY(startX);
@@ -1083,7 +1150,6 @@
                 finishLinesCrossed = 0;
                 finalRaceTime = 0;
 
-                buildMinimapCache();
                 gameState = 'playing';
                 particles = [];
                 updateTimerDisplay();
@@ -1123,13 +1189,12 @@
                     ctx.fillRect(0, 0, canvas.width, canvas.height);
                 }
 
-                drawTiles();
+                drawTerrain();
                 drawFinishLine();
                 drawParticles();
                 drawBike();
                 drawUI();
                 drawPauseOverlay();
-                drawMinimap();
 
                 if (gameState === 'menu') drawMenu();
                 else if (gameState === 'gameover') drawGameOver();
@@ -1145,14 +1210,17 @@
             for (let i = 0; i < dirtImages.length; i++) {
                 dirtImages[i].onload = () => { };
             }
-            mapData = window.tileMaps[0];
-            if (mapData) {
-                const trackSize = window.trackSizes[0];
-                levelHeight = trackSize[0];
-                levelWidth = trackSize[1];
-                finishLineX = levelWidth * 0.9;
-                buildMinimapCache();
+            if (window.tileMaps && window.tileMaps[0] && window.trackSizes && window.trackSizes[0]) {
+                mapData = window.tileMaps[0];
+                levelHeight = window.trackSizes[0][0];
+                levelWidth = window.trackSizes[0][1];
+            } else {
+                mapData = null;
+                levelHeight = 800;
+                levelWidth = 6000;
             }
+            finishLineX = levelWidth * 0.9;
+            generateSineTerrain();
             gameLoop();
         })();
     </script>
