@@ -11,6 +11,8 @@
             padding: 0;
             box-sizing: border-box;
             user-select: none;
+            -webkit-user-select: none;
+            touch-action: none;
         }
 
         body {
@@ -20,17 +22,24 @@
             align-items: center;
             min-height: 100vh;
             font-family: 'Arial Narrow', Arial, 'Elementary SF Black', 'Chanson Heavy SF', Tahoma, monospace;
+            overflow: hidden;
         }
 
         #game-container {
             position: relative;
+            width: 100%;
+            max-width: 800px;
+            aspect-ratio: 800 / 500;
             box-shadow: 0 0 50px rgba(0, 0, 0, 0.5);
             border: 4px solid #444;
             background: #000;
+            overflow: hidden;
         }
 
         canvas {
             display: block;
+            width: 100%;
+            height: 100%;
             image-rendering: crisp-edges;
             image-rendering: pixelated;
             cursor: pointer;
@@ -81,6 +90,84 @@
             pointer-events: none;
             font-family: monospace;
         }
+
+        /* Mobile Controls */
+        #mobile-controls {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 20;
+        }
+
+        .mob-btn {
+            position: absolute;
+            pointer-events: auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            font-weight: bold;
+            border-radius: 50%;
+            backdrop-filter: blur(2px);
+            -webkit-backdrop-filter: blur(2px);
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+        }
+
+        #btn-gas {
+            right: 12px;
+            bottom: 90px;
+            width: 85px;
+            height: 85px;
+            background: rgba(46, 204, 113, 0.35);
+            font-size: 16px;
+        }
+
+        #btn-brake {
+            left: 12px;
+            bottom: 90px;
+            width: 85px;
+            height: 85px;
+            background: rgba(231, 76, 60, 0.35);
+            font-size: 14px;
+        }
+
+        #btn-left {
+            left: 50%;
+            bottom: 12px;
+            transform: translateX(-85px);
+            width: 65px;
+            height: 65px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 14px;
+            font-size: 28px;
+        }
+
+        #btn-right {
+            left: 50%;
+            bottom: 12px;
+            transform: translateX(20px);
+            width: 65px;
+            height: 65px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 14px;
+            font-size: 28px;
+        }
+
+        @media (max-width: 600px) {
+            .hud-text {
+                font-size: 12px;
+                padding: 6px 8px;
+            }
+
+            #speedometer {
+                font-size: 16px;
+            }
+        }
     </style>
 </head>
 
@@ -91,6 +178,13 @@
         <div id="lap" class="hud-text">Checkpoint 1 / 3</div>
         <div id="speedometer" class="hud-text"><span id="speed-val">0</span> km/h</div>
         <div id="debug"></div>
+
+        <div id="mobile-controls">
+            <div id="btn-gas" class="mob-btn">GAS</div>
+            <div id="btn-brake" class="mob-btn">BRAKE</div>
+            <div id="btn-left" class="mob-btn">←</div>
+            <div id="btn-right" class="mob-btn">→</div>
+        </div>
     </div>
 
     <script src="maps.js"></script>
@@ -107,12 +201,44 @@
             const BRAKE_FORCE = 500;
             const LEAN_SPEED = 4.0;
             const MAX_LEAN = 0.65;
-            const TOTAL_LAPS = 3;
+            const MAX_STAGES = 100;
 
             // ---------- World ----------
-            let currentLevel = 0;
+            let currentStage = 1;
             let levelWidth = 0, levelHeight = 0;
             let mapData = null;
+            let totalLaps = 3;
+
+            // ---------- Progress ----------
+            let unlockedStage = 1;
+            const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+            function loadProgress() {
+                try {
+                    const saved = localStorage.getItem('tgmx2_progress');
+                    if (saved) {
+                        const data = JSON.parse(saved);
+                        unlockedStage = Math.max(1, Math.min(MAX_STAGES, data.unlockedStage || 1));
+                    }
+                } catch (e) {
+                    unlockedStage = 1;
+                }
+            }
+
+            function saveProgress() {
+                try {
+                    localStorage.setItem('tgmx2_progress', JSON.stringify({ unlockedStage }));
+                } catch (e) { }
+            }
+
+            function getStageInfo(stage) {
+                // stage is 1-indexed
+                const totalLaps = stage + 2; // 3, 4, 5, ...
+                const prevCheckpoints = ((stage - 1) * stage) / 2 + 2 * (stage - 1);
+                const firstCp = prevCheckpoints + 1;
+                const finishCp = firstCp + totalLaps - 1;
+                return { totalLaps, firstCp, finishCp };
+            }
 
             // ---------- Sine-wave terrain ----------
             let terrainSamples = [];
@@ -148,8 +274,6 @@
                 return y0 + (y1 - y0) * t;
             }
 
-
-
             // ---------- Game State ----------
             let gameState = 'menu';
             let subMenu = null;
@@ -162,7 +286,6 @@
 
             // ---------- Lap & Stage ----------
             let currentLap = 1;
-            let currentStage = 1;
             let lapCrossed = false;
             let finishLinesCrossed = 0;
             let finishLineX = 0;
@@ -182,8 +305,6 @@
                 dirtImages.push(img);
             }
 
-
-
             // ---------- Sound Toggle ----------
             let soundEnabled = true;
             const SOUND_BTN_W = 44;
@@ -197,7 +318,7 @@
             bgMusic.volume = 1.0;
 
             // ---------- Lap completion tracking ----------
-            let lapCompleted = [false, false, false];   // index 0 = lap1, 1 = lap2, 2 = lap3
+            let lapCompleted = [];
 
             function syncMusic() {
                 const shouldPlay = (gameState === 'playing' || gameState === 'paused') && soundEnabled;
@@ -249,9 +370,8 @@
             }
 
             const menuButtons = [
-                { label: "PRACTICE", y: Math.round(260 * canvas.height / 600), action: () => startGame() },
-                { label: "COMPETE", y: Math.round(320 * canvas.height / 600), action: () => startGame() },
-                { label: "HOW TO PLAY", y: Math.round(380 * canvas.height / 600), action: () => { subMenu = 'howto'; } },
+                { label: "PLAY", y: Math.round(280 * canvas.height / 600), action: () => { gameState = 'stageSelect'; } },
+                { label: "HOW TO PLAY", y: Math.round(360 * canvas.height / 600), action: () => { subMenu = 'howto'; } },
                 { label: "ABOUT", y: Math.round(440 * canvas.height / 600), action: () => { subMenu = 'about'; } }
             ];
             const btnWidth = 220, btnHeight = 44;
@@ -263,9 +383,16 @@
             ];
 
             let winButtons = [
-                { label: "NEXT STAGE", x: canvas.width / 2 - 110, y: Math.round(450 * canvas.height / 600), width: 100, height: 40, action: () => retryGame() },
+                { label: "NEXT STAGE", x: canvas.width / 2 - 110, y: Math.round(450 * canvas.height / 600), width: 100, height: 40, action: () => nextStage() },
                 { label: "MENU", x: canvas.width / 2 + 10, y: Math.round(450 * canvas.height / 600), width: 100, height: 40, action: () => { gameState = 'menu'; subMenu = null; syncMusic(); } }
             ];
+
+            // Stage select variables
+            let hoverStage = -1;
+            let hoverBack = false;
+            const STAGE_COLS = 5;
+            const STAGE_BTN_SIZE = 60;
+            const STAGE_GAP = 15;
 
             let mouseX = 0, mouseY = 0;
             let hoverIndex = -1;
@@ -275,8 +402,12 @@
                 const scaleY = canvas.height / rect.height;
                 mouseX = (e.clientX - rect.left) * scaleX;
                 mouseY = (e.clientY - rect.top) * scaleY;
+
+                hoverIndex = -1;
+                hoverStage = -1;
+                hoverBack = false;
+
                 if (gameState === 'menu' && !subMenu) {
-                    hoverIndex = -1;
                     for (let i = 0; i < menuButtons.length; i++) {
                         const btn = menuButtons[i];
                         if (mouseX >= btnX && mouseX <= btnX + btnWidth &&
@@ -285,8 +416,29 @@
                             break;
                         }
                     }
+                } else if (gameState === 'stageSelect') {
+                    // Check back button
+                    if (mouseX >= canvas.width - 100 && mouseX <= canvas.width - 20 &&
+                        mouseY >= 20 && mouseY <= 60) {
+                        hoverBack = true;
+                        return;
+                    }
+                    // Check stage buttons
+                    const maxVisible = Math.min(MAX_STAGES, unlockedStage + 10);
+                    const startX = (canvas.width - (STAGE_COLS * STAGE_BTN_SIZE + (STAGE_COLS - 1) * STAGE_GAP)) / 2;
+                    const startY = 100;
+                    for (let s = 1; s <= maxVisible; s++) {
+                        const row = Math.floor((s - 1) / STAGE_COLS);
+                        const col = (s - 1) % STAGE_COLS;
+                        const x = startX + col * (STAGE_BTN_SIZE + STAGE_GAP);
+                        const y = startY + row * (STAGE_BTN_SIZE + STAGE_GAP);
+                        if (mouseX >= x && mouseX <= x + STAGE_BTN_SIZE &&
+                            mouseY >= y && mouseY <= y + STAGE_BTN_SIZE) {
+                            hoverStage = s;
+                            break;
+                        }
+                    }
                 } else if (gameState === 'gameover') {
-                    hoverIndex = -1;
                     for (let i = 0; i < gameOverButtons.length; i++) {
                         const btn = gameOverButtons[i];
                         if (mouseX >= btn.x && mouseX <= btn.x + btn.width &&
@@ -296,7 +448,6 @@
                         }
                     }
                 } else if (gameState === 'win') {
-                    hoverIndex = -1;
                     for (let i = 0; i < winButtons.length; i++) {
                         const btn = winButtons[i];
                         if (mouseX >= btn.x && mouseX <= btn.x + btn.width &&
@@ -305,8 +456,6 @@
                             break;
                         }
                     }
-                } else {
-                    hoverIndex = -1;
                 }
             });
 
@@ -328,6 +477,14 @@
                             menuButtons[hoverIndex].action();
                         }
                     }
+                } else if (gameState === 'stageSelect') {
+                    if (hoverBack) {
+                        gameState = 'menu';
+                        return;
+                    }
+                    if (hoverStage !== -1 && hoverStage <= unlockedStage) {
+                        startStage(hoverStage);
+                    }
                 } else if (gameState === 'gameover') {
                     if (hoverIndex !== -1) {
                         gameOverButtons[hoverIndex].action();
@@ -342,7 +499,7 @@
             const keys = {};
             window.addEventListener('keydown', (e) => {
                 keys[e.code] = true;
-                if (e.code === 'Space' && gameState === 'menu') startGame();
+                if (e.code === 'Space' && gameState === 'menu') { gameState = 'stageSelect'; }
                 if (e.code === 'KeyR' && (gameState === 'gameover' || gameState === 'win')) retryGame();
                 if (e.code === 'KeyP' && (gameState === 'playing' || gameState === 'paused')) {
                     e.preventDefault();
@@ -359,11 +516,59 @@
                     soundEnabled = !soundEnabled;
                     syncMusic();
                 }
+                if (e.code === 'Escape' && (gameState === 'playing' || gameState === 'paused')) {
+                    gameState = 'menu';
+                    subMenu = null;
+                    raceTimeRunning = false;
+                    syncMusic();
+                    document.getElementById('timer').style.display = 'none';
+                    document.getElementById('lap').style.display = 'none';
+                    document.getElementById('speedometer').style.display = 'none';
+                }
             });
             window.addEventListener('keyup', e => { keys[e.code] = false; });
 
+            // ---------- Mobile Controls ----------
+            function setupMobileControls() {
+                const gas = document.getElementById('btn-gas');
+                const brake = document.getElementById('btn-brake');
+                const left = document.getElementById('btn-left');
+                const right = document.getElementById('btn-right');
+
+                const addTouch = (el, code) => {
+                    el.addEventListener('touchstart', (e) => { e.preventDefault(); keys[code] = true; });
+                    el.addEventListener('touchend', (e) => { e.preventDefault(); keys[code] = false; });
+                    el.addEventListener('touchcancel', (e) => { e.preventDefault(); keys[code] = false; });
+                    el.addEventListener('mousedown', (e) => { keys[code] = true; });
+                    el.addEventListener('mouseup', (e) => { keys[code] = false; });
+                    el.addEventListener('mouseleave', (e) => { keys[code] = false; });
+                };
+
+                if (gas) addTouch(gas, 'ArrowUp');
+                if (brake) addTouch(brake, 'ArrowDown');
+                if (left) addTouch(left, 'ArrowLeft');
+                if (right) addTouch(right, 'ArrowRight');
+            }
+
+            function updateMobileControlsVisibility() {
+                const mc = document.getElementById('mobile-controls');
+                if (!mc) return;
+                const show = isTouchDevice && (gameState === 'playing' || gameState === 'paused');
+                mc.style.display = show ? 'flex' : 'none';
+            }
+
             function retryGame() {
-                initLevel(0);
+                startStage(currentStage);
+            }
+
+            function nextStage() {
+                if (currentStage < MAX_STAGES) {
+                    startStage(currentStage + 1);
+                } else {
+                    gameState = 'menu';
+                    subMenu = null;
+                    syncMusic();
+                }
             }
 
             // ---------- Terrain helpers ----------
@@ -485,8 +690,6 @@
                 }
 
                 // ---- WHEELIE / STOPPIE physics ----
-                // Left arrow (lean back) = wheelie: lift front wheel
-                // Right arrow (lean forward) = stoppie: lift rear wheel
                 const absSpeed = Math.abs(bikeVelocity);
                 const minSpeedForWheelie = 15;
 
@@ -496,7 +699,6 @@
                     const maxWheelieHeight = 45;
                     const maxStoppieHeight = 25;
 
-                    // WHEELIE: lean back (negative lean angle) lifts front wheel
                     if (bikeLeanAngle < -0.05) {
                         const leanFactor = Math.min(1.0, Math.abs(bikeLeanAngle) / MAX_LEAN);
                         const groundY = getTerrainHeightAt(points[1].x);
@@ -509,7 +711,6 @@
                         }
                     }
 
-                    // STOPPIE: lean forward (positive lean angle) lifts rear wheel
                     if (bikeLeanAngle > 0.05) {
                         const leanFactor = Math.min(1.0, bikeLeanAngle / MAX_LEAN);
                         const groundY = getTerrainHeightAt(points[0].x);
@@ -616,6 +817,7 @@
                     if (p.life <= 0 || p.y > levelHeight + 100) particles.splice(i, 1);
                 }
             }
+
             // ---------- Camera, scoring, lap detection ----------
             function updateGameStats(dt) {
                 if (gameState !== 'playing') return;
@@ -652,23 +854,28 @@
 
                 if (rearX >= nextFinishLineX) {
                     finishLinesCrossed++;
-                    // Mark the lap that was just completed as finished
-                    if (finishLinesCrossed <= TOTAL_LAPS) {
+                    if (finishLinesCrossed <= totalLaps) {
                         lapCompleted[finishLinesCrossed - 1] = true;
                     }
                     currentLap = finishLinesCrossed + 1;
 
-                    if (currentLap > TOTAL_LAPS) {
+                    if (currentLap > totalLaps) {
                         gameState = 'win';
                         raceTimeRunning = false;
                         finalRaceTime = raceTime;
+                        if (currentStage === unlockedStage && unlockedStage < MAX_STAGES) {
+                            unlockedStage++;
+                            saveProgress();
+                        }
                         syncMusic();
                         return;
                     }
                 }
 
                 updateTimerDisplay();
-                document.getElementById('lap').innerText = `Checkpoint ${currentLap} / ${TOTAL_LAPS}`;
+                const stageInfo = getStageInfo(currentStage);
+                const globalCp = stageInfo.firstCp + finishLinesCrossed;
+                document.getElementById('lap').innerText = `Checkpoint ${globalCp} / ${stageInfo.finishCp}`;
                 document.getElementById('speed-val').innerText = Math.floor(Math.abs(bikeVelocity) * 0.18);
             }
 
@@ -708,7 +915,6 @@
                 return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${centiseconds.toString().padStart(2, '0')}`;
             }
 
-
             function drawSoundToggle() {
                 ctx.fillStyle = soundEnabled ? '#2ecc71' : '#e74c3c';
                 ctx.fillRect(SOUND_BTN_X, SOUND_BTN_Y, SOUND_BTN_W, SOUND_BTN_H);
@@ -744,7 +950,7 @@
                 ctx.restore();
             }
 
-            const tickerMessage = "Press Space to begin.  |  Use Arrow Keys to move.  |  Press P to pause.  |  Complete 3 laps to win!  |  TG Motocross 2 - HTML5 Edition  |  Good luck!";
+            const tickerMessage = "Press Space to begin.  |  Use Arrow Keys to move.  |  Press P to pause.  |  Complete all checkpoints to win!  |  TG Motocross 2 - HTML5 Edition  |  Good luck!";
             let tickerX = canvas.width;
             let tickerTextWidth = 0;
             const TICKER_SPEED = 1.2;
@@ -790,11 +996,12 @@
                 ctx.fillText('HOW TO PLAY', canvas.width / 2, 100);
                 ctx.font = '20px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
                 ctx.fillStyle = '#fff';
-                ctx.fillText('Arrow Up: Accelerate', canvas.width / 2, 180);
-                ctx.fillText('Arrow Down: Brake', canvas.width / 2, 230);
-                ctx.fillText('Arrow Left / Right: Lean', canvas.width / 2, 280);
-                ctx.fillText('P: Pause', canvas.width / 2, 330);
-                ctx.fillText('Complete all 3 laps to win!', canvas.width / 2, 380);
+                ctx.fillText('Arrow Up / Gas Button: Accelerate', canvas.width / 2, 170);
+                ctx.fillText('Arrow Down / Brake Button: Brake', canvas.width / 2, 210);
+                ctx.fillText('Arrow Left / Right: Lean', canvas.width / 2, 250);
+                ctx.fillText('P: Pause', canvas.width / 2, 290);
+                ctx.fillText('Complete all checkpoints to win!', canvas.width / 2, 330);
+                ctx.fillText('Unlock up to 100 stages!', canvas.width / 2, 370);
                 ctx.font = 'bold 18px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
                 ctx.fillStyle = '#FF6600';
                 ctx.fillRect(canvas.width - 100, 20, 80, 40);
@@ -819,6 +1026,62 @@
                 ctx.fillText('BACK', canvas.width - 60, 45);
             }
 
+            function drawStageSelect() {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.92)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                ctx.font = 'bold 36px "Arial Narrow", Arial, Tahoma, monospace';
+                ctx.fillStyle = '#FF6600';
+                ctx.textAlign = 'center';
+                ctx.fillText('SELECT STAGE', canvas.width / 2, 55);
+
+                const maxVisible = Math.min(MAX_STAGES, unlockedStage + 10);
+                const startX = (canvas.width - (STAGE_COLS * STAGE_BTN_SIZE + (STAGE_COLS - 1) * STAGE_GAP)) / 2;
+                const startY = 85;
+
+                for (let s = 1; s <= maxVisible; s++) {
+                    const row = Math.floor((s - 1) / STAGE_COLS);
+                    const col = (s - 1) % STAGE_COLS;
+                    const x = startX + col * (STAGE_BTN_SIZE + STAGE_GAP);
+                    const y = startY + row * (STAGE_BTN_SIZE + STAGE_GAP);
+
+                    const isUnlocked = s <= unlockedStage;
+                    const isHover = (hoverStage === s);
+
+                    ctx.fillStyle = isUnlocked ? (isHover ? '#FF6600' : '#444444') : '#222222';
+                    ctx.fillRect(x, y, STAGE_BTN_SIZE, STAGE_BTN_SIZE);
+                    ctx.strokeStyle = isUnlocked ? '#FF6600' : '#555555';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(x, y, STAGE_BTN_SIZE, STAGE_BTN_SIZE);
+
+                    ctx.fillStyle = isUnlocked ? '#ffffff' : '#666666';
+                    ctx.font = 'bold 18px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(s, x + STAGE_BTN_SIZE / 2, y + STAGE_BTN_SIZE / 2 - 2);
+
+                    if (!isUnlocked) {
+                        ctx.font = '12px Arial';
+                        ctx.fillText('🔒', x + STAGE_BTN_SIZE / 2, y + STAGE_BTN_SIZE / 2 + 16);
+                    }
+                }
+
+                // Back button
+                ctx.fillStyle = hoverBack ? '#FF6600' : '#333333';
+                ctx.fillRect(canvas.width - 100, 15, 80, 36);
+                ctx.strokeStyle = '#FF6600';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(canvas.width - 100, 15, 80, 36);
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 16px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('BACK', canvas.width - 60, 33);
+
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'alphabetic';
+            }
+
             function drawGameOver() {
                 if (gameState !== 'gameover') return;
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
@@ -829,7 +1092,8 @@
                 ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2 - 80);
                 ctx.font = '22px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
                 ctx.fillStyle = '#fff';
-                ctx.fillText(`Time: ${formatTime(finalRaceTime)}`, canvas.width / 2, canvas.height / 2 - 20);
+                ctx.fillText(`Stage ${currentStage}`, canvas.width / 2, canvas.height / 2 - 40);
+                ctx.fillText(`Time: ${formatTime(finalRaceTime)}`, canvas.width / 2, canvas.height / 2 - 10);
                 for (let i = 0; i < gameOverButtons.length; i++) {
                     const btn = gameOverButtons[i];
                     const isHover = (hoverIndex === i);
@@ -852,13 +1116,20 @@
                 ctx.font = 'bold 48px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
                 ctx.fillStyle = '#ffcc00';
                 ctx.textAlign = 'center';
-                ctx.fillText('STAGE COMPLETE!', canvas.width / 2, canvas.height / 2 - 80);
-                ctx.font = '22px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                const stageInfo = getStageInfo(currentStage);
+                ctx.fillText('STAGE COMPLETE!', canvas.width / 2, canvas.height / 2 - 90);
+                ctx.font = '24px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
                 ctx.fillStyle = '#fff';
-                ctx.fillText(`Time: ${formatTime(finalRaceTime)}`, canvas.width / 2, canvas.height / 2 - 20);
-                ctx.fillText(`Lap 3 / 3 Complete`, canvas.width / 2, canvas.height / 2 + 20);
-                for (let i = 0; i < winButtons.length; i++) {
-                    const btn = winButtons[i];
+                ctx.fillText(`Stage ${currentStage} Cleared!`, canvas.width / 2, canvas.height / 2 - 40);
+                ctx.font = '20px "Arial Narrow", Arial, "Elementary SF Black", "Chanson Heavy SF", Tahoma, monospace';
+                ctx.fillText(`Checkpoints ${stageInfo.firstCp}-${stageInfo.finishCp}`, canvas.width / 2, canvas.height / 2 - 5);
+                ctx.fillText(`Time: ${formatTime(finalRaceTime)}`, canvas.width / 2, canvas.height / 2 + 30);
+
+                const showNext = currentStage < MAX_STAGES;
+                const buttonsToShow = showNext ? winButtons : [winButtons[1]]; // Only menu if last stage
+
+                for (let i = 0; i < buttonsToShow.length; i++) {
+                    const btn = buttonsToShow[i];
                     const isHover = (hoverIndex === i);
                     ctx.fillStyle = isHover ? '#FF6600' : '#333333';
                     ctx.fillRect(btn.x, btn.y, btn.width, btn.height);
@@ -871,6 +1142,7 @@
                 }
                 ctx.textAlign = 'left';
             }
+
             function drawTerrain() {
                 if (terrainSamples.length === 0) {
                     ctx.fillStyle = '#8B5A2B';
@@ -880,7 +1152,6 @@
                 const startWorldX = cameraX;
                 const step = 2;
 
-                // Draw dirt fill below terrain surface
                 ctx.fillStyle = '#6B3A2A';
                 ctx.beginPath();
                 ctx.moveTo(0, canvas.height);
@@ -894,7 +1165,6 @@
                 ctx.closePath();
                 ctx.fill();
 
-                // Darker sub‑surface layer
                 ctx.fillStyle = '#4a2518';
                 ctx.beginPath();
                 ctx.moveTo(0, canvas.height);
@@ -908,29 +1178,25 @@
                 ctx.closePath();
                 ctx.fill();
 
-                // ---------- Underground stones (pebbles) ----------
-                const stoneStartX = Math.floor(startWorldX / 20) * 20;   // align to a grid
+                const stoneStartX = Math.floor(startWorldX / 20) * 20;
                 const stoneEndX = startWorldX + canvas.width + 20;
-                ctx.fillStyle = '#5a5a5a';   // grey stones
+                ctx.fillStyle = '#5a5a5a';
                 for (let wx = stoneStartX; wx <= stoneEndX; wx += 20) {
-                    // Deterministic pseudo‑random based on world X
                     const hash = (wx * 0x9e3779b9) >>> 0;
-                    const placeStone = (hash % 100) < 35;   // ~35% chance of a stone at this column
+                    const placeStone = (hash % 100) < 35;
                     if (!placeStone) continue;
 
                     const terrainY = getTerrainHeightAt(wx);
-                    // Stones appear a little below the surface
-                    const stoneY = terrainY + 8 + (hash % 40);   // 8‑48 px below grass
+                    const stoneY = terrainY + 8 + (hash % 40);
                     const screenY = stoneY - cameraY;
                     if (screenY < -10 || screenY > canvas.height + 10) continue;
 
-                    const size = 2 + (hash % 5);   // 2‑6 px radius
+                    const size = 2 + (hash % 5);
                     ctx.beginPath();
                     ctx.ellipse(wx - startWorldX, screenY, size, size * 0.7, 0, 0, Math.PI * 2);
                     ctx.fill();
                 }
 
-                // Grass line on top (unchanged)
                 ctx.strokeStyle = '#3d7a28';
                 ctx.lineWidth = 4;
                 ctx.beginPath();
@@ -948,7 +1214,6 @@
                 }
                 ctx.stroke();
 
-                // Highlight edge (unchanged)
                 ctx.strokeStyle = '#5a9e3a';
                 ctx.lineWidth = 1.5;
                 ctx.beginPath();
@@ -967,6 +1232,7 @@
                 ctx.stroke();
                 ctx.lineWidth = 1;
             }
+
             function drawBike() {
                 if (!points.length) return;
 
@@ -974,7 +1240,6 @@
                 const front = points[1];
                 const bikeAngle = Math.atan2(front.y - rear.y, front.x - rear.x);
 
-                // World positions → screen positions
                 const rsx = rear.x - cameraX;
                 const rsy = rear.y - cameraY;
                 const fsx = front.x - cameraX;
@@ -982,37 +1247,27 @@
                 const midX = (rsx + fsx) / 2;
                 const midY = (rsy + fsy) / 2;
 
-                const wheelImg = assets.wheel;           // wheel_tire.png
-                const bikeRiderImg = assets.rider;       // rider.png
-                const wheelSize = 33;                    // drawn size of the wheel
+                const wheelImg = assets.wheel;
+                const bikeRiderImg = assets.rider;
+                const wheelSize = 33;
                 const wheelPivot = wheelSize / 2;
-                const compression = Math.min(6, Math.abs(bikeVelocity) * 0.001); // fork compression
+                const compression = Math.min(6, Math.abs(bikeVelocity) * 0.001);
 
-                // ============================================================
-                // INDEPENDENT IMAGE CONTROLS — tweak these values
-                // ============================================================
+                const riderOffsetX = 5;
+                const riderOffsetY = 24;
+                const riderRotation = 0;
+                const riderDrawWidth = 113;
+                const riderPivotX = 0.5;
+                const riderPivotY = 1.0;
 
-                // --- RIDER / FRAME image controls ---
-                const riderOffsetX = 5;          // horizontal shift (left/right from midpoint)
-                const riderOffsetY = 24;         // vertical shift (up/down from midpoint)
-                const riderRotation = 0;         // extra rotation in radians (added to bike angle)
-                const riderDrawWidth = 113;       // width in pixels
-                const riderPivotX = 0.5;         // horizontal pivot (0 = left, 0.5 = center, 1 = right)
-                const riderPivotY = 1.0;         // vertical pivot (0 = top, 1.0 = bottom)
+                const wheelOffsetX = 0;
+                const wheelOffsetY = 0;
+                const wheelRotation = 0;
 
-                // --- WHEEL image controls ---
-                const wheelOffsetX = 0;          // horizontal shift from wheel center
-                const wheelOffsetY = 0;          // vertical shift from wheel center
-                const wheelRotation = 0;         // extra rotation in radians (added to wheelAngle)
-                // wheelDrawSize is already set by `wheelSize` above
-
-                // ============================================================
-
-                // --- 1. Rear wheel (drawn behind the bike) ---
                 ctx.save();
                 ctx.translate(rsx, rsy);
                 ctx.rotate(wheelAngle + wheelRotation);
-                ctx.translate(wheelOffsetX, wheelOffsetY); // apply offset after rotation so it's relative
+                ctx.translate(wheelOffsetX, wheelOffsetY);
                 if (wheelImg && wheelImg.complete && wheelImg.naturalWidth > 0) {
                     ctx.drawImage(wheelImg, -wheelPivot, -wheelPivot, wheelSize, wheelSize);
                 } else {
@@ -1023,7 +1278,6 @@
                 }
                 ctx.restore();
 
-                // --- 2. Rider + bike frame (between wheels) ---
                 ctx.save();
                 ctx.translate(midX + riderOffsetX, midY + riderOffsetY);
                 ctx.rotate(bikeAngle + bikeLeanAngle * 0.4 + riderRotation);
@@ -1031,27 +1285,21 @@
                 if (bikeRiderImg && bikeRiderImg.complete && bikeRiderImg.naturalWidth > 0) {
                     const imgW = bikeRiderImg.naturalWidth;
                     const imgH = bikeRiderImg.naturalHeight;
-
                     const drawWidth = riderDrawWidth;
                     const drawHeight = (imgH / imgW) * drawWidth;
-
-                    // Calculate pivot point based on ratios
                     const pivotX = drawWidth * riderPivotX;
                     const pivotY = drawHeight * riderPivotY;
-
                     ctx.drawImage(bikeRiderImg, -pivotX, -pivotY, drawWidth, drawHeight);
                 } else {
-                    // Fallback – placeholder rectangle so the game never breaks
                     ctx.fillStyle = '#3498db';
                     ctx.fillRect(-42, -50, 84, 50);
                 }
                 ctx.restore();
 
-                // --- 3. Front wheel (drawn in front, with fork compression) ---
                 ctx.save();
                 ctx.translate(fsx, fsy - compression);
                 ctx.rotate(wheelAngle + wheelRotation);
-                ctx.translate(wheelOffsetX, wheelOffsetY); // apply offset after rotation so it's relative
+                ctx.translate(wheelOffsetX, wheelOffsetY);
                 if (wheelImg && wheelImg.complete && wheelImg.naturalWidth > 0) {
                     ctx.drawImage(wheelImg, -wheelPivot, -wheelPivot, wheelSize, wheelSize);
                 } else {
@@ -1062,6 +1310,7 @@
                 }
                 ctx.restore();
             }
+
             function drawParticles() {
                 for (let p of particles) {
                     const img = dirtImages[p.imgIndex];
@@ -1087,24 +1336,23 @@
 
                 const startLap = Math.max(0, Math.floor((cameraX - 20) / levelWidth));
                 const endLap = Math.floor((cameraX + canvas.width + 20) / levelWidth);
+                const stageInfo = getStageInfo(currentStage);
 
                 for (let lap = startLap; lap <= endLap; lap++) {
                     const screenX = (lap * levelWidth + finishLineX) - cameraX;
                     if (screenX < -10 || screenX > canvas.width + 10) continue;
 
-                    // Determine which lap this line instance belongs to (0‑based)
-                    const lapIndex = lap % TOTAL_LAPS;   // 0 = lap1, 1 = lap2, 2 = lap3
-                    const isCompleted = lapIndex < finishLinesCrossed;  // already crossed?
+                    const cpIndex = lap;
+                    const globalCp = stageInfo.firstCp + cpIndex;
+                    const isCompleted = cpIndex < finishLinesCrossed;
+                    const isLast = (cpIndex === stageInfo.totalLaps - 1);
 
-                    // Set text and colour
                     let label;
-                    if (lapIndex === 0) label = 'Checkpoint 1';
-                    else if (lapIndex === 1) label = 'Checkpoint 2';
-                    else label = 'FINISH';
+                    if (isLast) label = 'FINISH';
+                    else label = `Checkpoint ${globalCp}`;
 
-                    const textColor = isCompleted ? '#2ecc71' : '#ffffff';   // green if done, else white
+                    const textColor = isCompleted ? '#2ecc71' : '#ffffff';
 
-                    // Draw the checkerboard flags (unchanged)
                     for (let row = 0; row < flagHeight / squareSize; row++) {
                         for (let col = 0; col < 2; col++) {
                             const isDark = (row + col) % 2 === 0;
@@ -1117,7 +1365,6 @@
                         }
                     }
 
-                    // Draw the label
                     ctx.font = 'bold 13px Arial';
                     ctx.fillStyle = textColor;
                     ctx.textAlign = 'center';
@@ -1125,10 +1372,10 @@
                     ctx.fillText(label, screenX, groundY - flagHeight - 6);
                 }
 
-                // Reset alignment (good practice)
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'alphabetic';
             }
+
             function drawPauseOverlay() {
                 if (gameState !== 'paused') return;
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
@@ -1150,19 +1397,21 @@
             }
 
             // ---------- Level Init ----------
-            function initLevel(levelIdx) {
-                currentLevel = levelIdx;
-                mapData = (window.tileMaps && window.tileMaps[currentLevel]) ? window.tileMaps[currentLevel] : null;
-                if (window.trackSizes && window.trackSizes[currentLevel]) {
-                    levelHeight = window.trackSizes[currentLevel][0];
-                    levelWidth = window.trackSizes[currentLevel][1];
+            function initLevel(stage) {
+                currentStage = stage;
+                const stageInfo = getStageInfo(currentStage);
+                totalLaps = stageInfo.totalLaps;
+
+                mapData = (window.tileMaps && window.tileMaps[0]) ? window.tileMaps[0] : null;
+                if (window.trackSizes && window.trackSizes[0]) {
+                    levelHeight = window.trackSizes[0][0];
+                    levelWidth = window.trackSizes[0][1];
                 } else {
                     levelHeight = 800;
                     levelWidth = 6000;
                 }
                 finishLineX = levelWidth * 0.9;
 
-                // Generate procedural sine-wave terrain
                 generateSineTerrain();
 
                 const startX = 150;
@@ -1175,15 +1424,16 @@
                 raceTime = 0;
                 raceTimeRunning = true;
                 currentLap = 1;
-                currentStage = 1;
                 lapCrossed = false;
                 finishLinesCrossed = 0;
                 finalRaceTime = 0;
+                lapCompleted = new Array(totalLaps).fill(false);
 
                 gameState = 'playing';
                 particles = [];
                 updateTimerDisplay();
-                document.getElementById('lap').innerText = `LAP ${currentLap} / ${TOTAL_LAPS}`;
+                const si = getStageInfo(currentStage);
+                document.getElementById('lap').innerText = `Checkpoint ${si.firstCp} / ${si.finishCp}`;
                 document.getElementById('timer').style.display = 'block';
                 document.getElementById('lap').style.display = 'block';
                 document.getElementById('speedometer').style.display = 'block';
@@ -1191,9 +1441,9 @@
                 syncMusic();
             }
 
-            function startGame() {
+            function startStage(stage) {
                 subMenu = null;
-                initLevel(0);
+                initLevel(stage);
             }
 
             // ---------- Main Loop ----------
@@ -1206,6 +1456,7 @@
 
                 updatePhysics(dt);
                 updateGameStats(dt);
+                updateMobileControlsVisibility();
 
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -1227,6 +1478,7 @@
                 drawPauseOverlay();
 
                 if (gameState === 'menu') drawMenu();
+                else if (gameState === 'stageSelect') drawStageSelect();
                 else if (gameState === 'gameover') drawGameOver();
                 else if (gameState === 'win') drawWin();
 
@@ -1237,6 +1489,9 @@
             }
 
             loadAssets();
+            loadProgress();
+            setupMobileControls();
+
             for (let i = 0; i < dirtImages.length; i++) {
                 dirtImages[i].onload = () => { };
             }
