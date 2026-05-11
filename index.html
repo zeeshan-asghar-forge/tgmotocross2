@@ -426,7 +426,6 @@
             }
 
             // ---------- Physics ----------
-            // ---------- Physics ----------
             function updatePhysics(dt) {
                 if (gameState !== 'playing') return;
 
@@ -435,18 +434,18 @@
 
                 // ---- Global engine speed (for rear wheel drive) ----
                 if (throttle) bikeVelocity += ACCEL * dt;
-                if (brake) bikeVelocity -= BRAKE_FORCE * dt;   // also reduces engine speed
+                if (brake) bikeVelocity -= BRAKE_FORCE * dt;
                 bikeVelocity *= (1.0 - 0.9 * dt);
                 bikeVelocity = Math.min(55, Math.max(-150, bikeVelocity));
 
-                // ---- Lean control (unchanged) ----
+                // ---- Lean control: Left = lean back (wheelie), Right = lean forward (stoppie) ----
                 if (keys['ArrowLeft']) targetLean = -1;
                 else if (keys['ArrowRight']) targetLean = 1;
                 else targetLean = 0;
                 bikeLeanAngle += (targetLean * MAX_LEAN - bikeLeanAngle) * (LEAN_SPEED * dt);
                 bikeLeanAngle = Math.max(-MAX_LEAN, Math.min(MAX_LEAN, bikeLeanAngle));
 
-                // ---- Verlet integration (gravity on all points, as before) ----
+                // ---- Verlet integration (gravity on all points) ----
                 for (let i = 0; i < points.length; i++) {
                     const p = points[i];
                     const pv = prevPoints[i];
@@ -463,26 +462,64 @@
                 const speedFactor = Math.min(1.0, Math.abs(bikeVelocity) / 200);
                 const steerAngle = axleAngle + bikeLeanAngle * 0.25 * speedFactor;
                 const driveX = bikeVelocity * dt * Math.cos(steerAngle);
-                const driveY = bikeVelocity * dt * Math.sin(steerAngle) * 0.0;   // keep vertical drive zero to avoid artificial lift
+                const driveY = bikeVelocity * dt * Math.sin(steerAngle) * 0.0;
 
                 points[0].x += driveX;
                 points[0].y += driveY;
                 // Front wheel gets NO drive force
 
-                // ---- Front‑wheel braking (impulse opposite to its motion) ----
+                // ---- Front-wheel braking (impulse opposite to its motion) ----
                 if (brake) {
                     const f = points[1];
                     const fv = prevPoints[1];
-                    const fVelX = f.x - fv.x;   // raw velocity (dt cancels out)
+                    const fVelX = f.x - fv.x;
                     const fVelY = f.y - fv.y;
                     const fSpeed = Math.hypot(fVelX, fVelY);
                     if (fSpeed > 0.001) {
-                        const brakeStrength = 0.25;   // fraction of speed removed per frame
+                        const brakeStrength = 0.25;
                         const normX = fVelX / fSpeed;
                         const normY = fVelY / fSpeed;
-                        // Adjust previous position to reduce velocity
                         prevPoints[1].x += normX * fSpeed * brakeStrength;
                         prevPoints[1].y += normY * fSpeed * brakeStrength;
+                    }
+                }
+
+                // ---- WHEELIE / STOPPIE physics ----
+                // Left arrow (lean back) = wheelie: lift front wheel
+                // Right arrow (lean forward) = stoppie: lift rear wheel
+                const absSpeed = Math.abs(bikeVelocity);
+                const minSpeedForWheelie = 15;
+
+                if (absSpeed > minSpeedForWheelie) {
+                    const speedFactor = Math.min(1.0, (absSpeed - minSpeedForWheelie) / 80);
+                    const maxLiftAccel = 2200;
+                    const maxWheelieHeight = 45;
+                    const maxStoppieHeight = 25;
+
+                    // WHEELIE: lean back (negative lean angle) lifts front wheel
+                    if (bikeLeanAngle < -0.05) {
+                        const leanFactor = Math.min(1.0, Math.abs(bikeLeanAngle) / MAX_LEAN);
+                        const groundY = getTerrainHeightAt(points[1].x);
+                        const heightAboveGround = groundY - (points[1].y + WHEEL_RADIUS);
+                        const heightFactor = Math.max(0, 1 - heightAboveGround / maxWheelieHeight);
+                        const liftAccel = maxLiftAccel * leanFactor * speedFactor * heightFactor;
+
+                        if (liftAccel > 0) {
+                            points[1].y -= liftAccel * dt * dt;
+                        }
+                    }
+
+                    // STOPPIE: lean forward (positive lean angle) lifts rear wheel
+                    if (bikeLeanAngle > 0.05) {
+                        const leanFactor = Math.min(1.0, bikeLeanAngle / MAX_LEAN);
+                        const groundY = getTerrainHeightAt(points[0].x);
+                        const heightAboveGround = groundY - (points[0].y + WHEEL_RADIUS);
+                        const heightFactor = Math.max(0, 1 - heightAboveGround / maxStoppieHeight);
+                        const liftAccel = maxLiftAccel * leanFactor * speedFactor * heightFactor;
+
+                        if (liftAccel > 0) {
+                            points[0].y -= liftAccel * dt * dt;
+                        }
                     }
                 }
 
@@ -502,7 +539,6 @@
 
                         if (p1IsWheel) {
                             p1.x -= dx * corr;
-                            // p1.y unchanged for wheels (kept on ground)
                         } else {
                             p1.x -= dx * corr;
                             p1.y -= dy * corr;
@@ -510,38 +546,33 @@
 
                         if (p2IsWheel) {
                             p2.x += dx * corr;
-                            // p2.y unchanged
                         } else {
                             p2.x += dx * corr;
                             p2.y += dy * corr;
                         }
                     }
 
-                    // ---- Smooth ground collision (vertical snap only, keep horizontal momentum) ----
+                    // ---- Ground collision (vertical snap only, keep horizontal momentum) ----
                     for (let idx of [0, 1]) {
                         const p = points[idx];
                         const pv = prevPoints[idx];
                         const gY = getTerrainHeightAt(p.x);
 
                         if (p.y + WHEEL_RADIUS > gY) {
-                            // Push wheel up to surface
                             p.y = gY - WHEEL_RADIUS;
-                            // Kill only vertical velocity (prevents bounce)
                             pv.y = p.y;
-                            // Leave pv.x untouched → natural horizontal rolling/sliding
 
-                            // Apply mild friction when on ground (reduces horizontal speed)
-                            const contactMargin = 4;   // also apply when very close
+                            const contactMargin = 4;
                             if (p.y + WHEEL_RADIUS <= gY + contactMargin) {
                                 const horizDiff = p.x - pv.x;
-                                const friction = 0.96;   // how much horizontal speed remains each frame
+                                const friction = 0.96;
                                 pv.x = p.x - horizDiff * friction;
                             }
                         }
                     }
                 }
 
-                // ---- Lean body points (unchanged) ----
+                // ---- Lean body points (rotates rider/frame around wheel midpoint) ----
                 const midX = (points[0].x + points[1].x) * 0.5;
                 const midY = (points[0].y + points[1].y) * 0.5;
                 for (let i = 2; i < points.length; i++) {
@@ -585,7 +616,6 @@
                     if (p.life <= 0 || p.y > levelHeight + 100) particles.splice(i, 1);
                 }
             }
-
             // ---------- Camera, scoring, lap detection ----------
             function updateGameStats(dt) {
                 if (gameState !== 'playing') return;
@@ -963,8 +993,8 @@
                 // ============================================================
 
                 // --- RIDER / FRAME image controls ---
-                const riderOffsetX = 0;          // horizontal shift (left/right from midpoint)
-                const riderOffsetY = 15;         // vertical shift (up/down from midpoint)
+                const riderOffsetX = 0.6;          // horizontal shift (left/right from midpoint)
+                const riderOffsetY = 16;         // vertical shift (up/down from midpoint)
                 const riderRotation = 0;         // extra rotation in radians (added to bike angle)
                 const riderDrawWidth = 84;       // width in pixels
                 const riderPivotX = 0.5;         // horizontal pivot (0 = left, 0.5 = center, 1 = right)
