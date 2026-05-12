@@ -195,10 +195,10 @@
             const debugDiv = document.getElementById('debug');
 
             // ---------- Constants ----------
-            const GRAVITY = 1000;
+            const GRAVITY = 500;
             const WHEEL_RADIUS = 12;
-            const ACCEL = 130;
-            const BRAKE_FORCE = 500;
+            const ACCEL = 180;
+            const BRAKE_FORCE = 400;
             const LEAN_SPEED = 4.0;
             const MAX_LEAN = 0.65;
             const MAX_STAGES = 100;
@@ -248,17 +248,29 @@
                 if (levelWidth <= 0) return;
                 const numSamples = Math.floor(levelWidth / TERRAIN_SAMPLE_STEP) + 1;
                 terrainSamples = new Array(numSamples);
-                const baseY = levelHeight * 0.58;
+                const baseY = levelHeight * 0.62;
                 for (let i = 0; i < numSamples; i++) {
                     const x = i * TERRAIN_SAMPLE_STEP;
                     let y = baseY;
-                    y += Math.sin(x * 0.0028) * 52;
-                    y += Math.sin(x * 0.0065 + 1.3) * 36;
-                    y += Math.sin(x * 0.014 + 0.7) * 22;
-                    y += Math.sin(x * 0.029 + 2.1) * 13;
-                    y += Math.sin(x * 0.0009 + 0.4) * 28;
-                    y += Math.sin(x * 0.052 + 3.7) * 8;
+                    y += Math.sin(x * 0.0018) * 75;
+                    y += Math.sin(x * 0.005 + 1.2) * 35;
+                    y += Math.sin(x * 0.013 + 0.8) * 12;
                     terrainSamples[i] = y;
+                }
+            }
+
+            function spawnLandingDust(wheelX, wheelY) {
+                const count = 8 + Math.floor(Math.random() * 5);
+                for (let i = 0; i < count; i++) {
+                    particles.push({
+                        x: wheelX + (Math.random() - 0.5) * 24,
+                        y: wheelY + WHEEL_RADIUS - 4,
+                        vx: (Math.random() - 0.5) * 120,
+                        vy: -Math.random() * 130 - 20,
+                        life: 0.4 + Math.random() * 0.4,
+                        size: 9 + Math.random() * 9,
+                        imgIndex: Math.floor(Math.random() * 8)
+                    });
                 }
             }
 
@@ -292,6 +304,9 @@
 
             // ---------- Bike ----------
             let points = [], prevPoints = [], constraints = [];
+            let wheelWasAirborne = [false, false];
+            let screenShakeFrames = 0;
+            let screenShakeIntensity = 0;
             let bikeVelocity = 0, bikeLeanAngle = 0, targetLean = 0;
             let cameraX = 0, cameraY = 0;
             let wheelAngle = 50;
@@ -319,6 +334,8 @@
 
             // ---------- Lap completion tracking ----------
             let lapCompleted = [];
+            let checkpointAnnounceTimer = 0;
+            let checkpointAnnounceText = '';
 
             function syncMusic() {
                 const shouldPlay = (gameState === 'playing' || gameState === 'paused') && soundEnabled;
@@ -586,7 +603,7 @@
                 prevPoints = points.map(p => ({ x: p.x, y: p.y }));
                 const dist = (i, j) => Math.hypot(points[i].x - points[j].x, points[i].y - points[j].y);
                 constraints = [
-                    { p1: 0, p2: 1, rest: dist(0, 1), stiff: 0.45 },
+                    { p1: 0, p2: 1, rest: dist(0, 1), stiff: 1.0 },
                     { p1: 0, p2: 2, rest: dist(0, 2), stiff: 0.95 },
                     { p1: 1, p2: 2, rest: dist(1, 2), stiff: 0.95 },
                     { p1: 2, p2: 3, rest: dist(2, 3), stiff: 1.0 },
@@ -641,7 +658,7 @@
                 if (throttle) bikeVelocity += ACCEL * dt;
                 if (brake) bikeVelocity -= BRAKE_FORCE * dt;
                 bikeVelocity *= (1.0 - 0.9 * dt);
-                bikeVelocity = Math.min(55, Math.max(-150, bikeVelocity));
+bikeVelocity = Math.min(100, Math.max(-55, bikeVelocity));
 
                 // ---- Lean control: Left = lean back (wheelie), Right = lean forward (stoppie) ----
                 if (keys['ArrowLeft']) targetLean = -1;
@@ -725,7 +742,7 @@
                 }
 
                 // ---- Constraint solver (unchanged) ----
-                for (let iter = 0; iter < 12; iter++) {
+                for (let iter = 0; iter < 50; iter++) {
                     for (let c of constraints) {
                         const p1 = points[c.p1];
                         const p2 = points[c.p2];
@@ -802,9 +819,29 @@
                 wheelAngle += bikeVelocity * dt * 0.5;
 
                 const rearWheel = points[0];
+                const frontWheel = points[1];
+
+                const rearGroundY = getTerrainHeightAt(rearWheel.x);
+                const frontGroundY = getTerrainHeightAt(frontWheel.x);
+                const rearAirborne = (rearWheel.y + WHEEL_RADIUS) < rearGroundY - 6;
+                const frontAirborne = (frontWheel.y + WHEEL_RADIUS) < frontGroundY - 6;
+
+                if (wheelWasAirborne[0] && !rearAirborne) {
+                    spawnLandingDust(rearWheel.x, rearWheel.y);
+                    const rearVelY = rearWheel.y - prevPoints[0].y;
+                    if (rearVelY > 8) { screenShakeFrames = 3; screenShakeIntensity = Math.min(4, rearVelY * 0.3); }
+                }
+                if (wheelWasAirborne[1] && !frontAirborne) {
+                    spawnLandingDust(frontWheel.x, frontWheel.y);
+                    const frontVelY = frontWheel.y - prevPoints[1].y;
+                    if (frontVelY > 8) { screenShakeFrames = 3; screenShakeIntensity = Math.min(4, frontVelY * 0.3); }
+                }
+
+                wheelWasAirborne[0] = rearAirborne;
+                wheelWasAirborne[1] = frontAirborne;
+
                 spawnDirtParticles(rearWheel.x, rearWheel.y, bikeVelocity, throttle, brake);
                 if (Math.random() < 0.3) {
-                    const frontWheel = points[1];
                     spawnDirtParticles(frontWheel.x, frontWheel.y, bikeVelocity, throttle, brake);
                 }
 
@@ -826,12 +863,14 @@
                     raceTime += dt * 1000;
                 }
 
-                cameraX = points[0].x - canvas.width * 0.4;
+                const targetCamX = points[0].x - canvas.width * 0.4;
+                cameraX += (targetCamX - cameraX) * 0.08;
                 cameraX = Math.max(0, cameraX);
                 if (levelWidth < canvas.width) cameraX = (levelWidth - canvas.width) / 2;
 
                 const midY = (points[0].y + points[1].y) / 2;
-                cameraY = midY - canvas.height * 0.6;
+                const targetCamY = midY - canvas.height * 0.6;
+                cameraY += (targetCamY - cameraY) * 0.08;
                 cameraY = Math.min(Math.max(0, cameraY), levelHeight - canvas.height);
                 if (levelHeight < canvas.height) cameraY = (levelHeight - canvas.height) / 2;
 
@@ -858,6 +897,9 @@
                         lapCompleted[finishLinesCrossed - 1] = true;
                     }
                     currentLap = finishLinesCrossed + 1;
+                    const isLastLap = currentLap > totalLaps;
+                    checkpointAnnounceText = isLastLap ? 'FINISH!' : `Checkpoint ${finishLinesCrossed} / ${totalLaps}`;
+                    checkpointAnnounceTimer = 0.8;
 
                     if (currentLap > totalLaps) {
                         gameState = 'win';
@@ -1392,6 +1434,22 @@
                 ctx.textBaseline = 'alphabetic';
             }
 
+            function drawCheckpointAnnounce(dt) {
+                if (checkpointAnnounceTimer <= 0) return;
+                checkpointAnnounceTimer -= dt;
+                const alpha = Math.min(1, checkpointAnnounceTimer * 3);
+                ctx.save();
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+                ctx.fillRect(0, canvas.height / 2 - 60, canvas.width, 120);
+                ctx.font = 'bold 52px "Arial Narrow", Arial, Tahoma, monospace';
+                ctx.fillStyle = '#ffcc00';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(checkpointAnnounceText, canvas.width / 2, canvas.height / 2);
+                ctx.restore();
+            }
+
             function drawUI() {
                 debugDiv.innerText = `X:${Math.round(points[0]?.x || 0)} Y:${Math.round(points[0]?.y || 0)} Vel:${Math.round(bikeVelocity)} Lean:${bikeLeanAngle.toFixed(2)} Part:${particles.length}`;
             }
@@ -1459,6 +1517,14 @@
                 updateMobileControlsVisibility();
 
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
+                let shakeX = 0, shakeY = 0;
+                if (screenShakeFrames > 0) {
+                    shakeX = (Math.random() - 0.5) * 2 * screenShakeIntensity;
+                    shakeY = (Math.random() - 0.5) * 2 * screenShakeIntensity;
+                    screenShakeFrames--;
+                }
+                ctx.save();
+                ctx.translate(shakeX, shakeY);
 
                 if (assets.bg && assets.bg.complete && assets.bg.naturalWidth > 0) {
                     const bgW = assets.bg.width;
@@ -1474,8 +1540,8 @@
                 drawFinishLine();
                 drawParticles();
                 drawBike();
-                drawUI();
                 drawPauseOverlay();
+                drawCheckpointAnnounce(dt);
 
                 if (gameState === 'menu') drawMenu();
                 else if (gameState === 'stageSelect') drawStageSelect();
@@ -1484,6 +1550,7 @@
 
                 drawSoundToggle();
                 drawTickerBar();
+                ctx.restore();
 
                 requestAnimationFrame(gameLoop);
             }
