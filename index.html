@@ -175,7 +175,7 @@
     <div id="game-container">
         <canvas id="gameCanvas" width="800" height="500"></canvas>
         <div id="timer" class="hud-text">TIME 00:00.00</div>
-        <div id="lap" class="hud-text">Checkpoint 1 / 3</div>
+        <div id="lap" class="hud-text" style="display:none;">Checkpoint 1 / 3</div>
         <div id="speedometer" class="hud-text"><span id="speed-val">0</span> km/h</div>
         <div id="debug"></div>
 
@@ -335,6 +335,9 @@
             // ---------- Lap completion tracking ----------
             let lapCompleted = [];
             let checkpointAnnounceTimer = 0;
+            const FUEL_MAX = 100;
+            let fuel = FUEL_MAX;
+            const FUEL_DRAIN_RATE = 4.5;
             let checkpointAnnounceText = '';
 
             function syncMusic() {
@@ -877,8 +880,10 @@ bikeVelocity = Math.min(100, Math.max(-55, bikeVelocity));
                 if (startProtection > 0) {
                     startProtection -= dt;
                 } else {
+                    fuel -= FUEL_DRAIN_RATE * dt;
+                    if (fuel < 0) fuel = 0;
                     const headGround = getTerrainHeightAt(points[3].x);
-                    if (points[3].y > headGround + 25 || points[0].y > levelHeight + 100) {
+                    if (points[3].y > headGround + 25 || points[0].y > levelHeight + 100 || fuel <= 0) {
                         gameState = 'gameover';
                         raceTimeRunning = false;
                         finalRaceTime = raceTime;
@@ -900,6 +905,7 @@ bikeVelocity = Math.min(100, Math.max(-55, bikeVelocity));
                     const isLastLap = currentLap > totalLaps;
                     checkpointAnnounceText = isLastLap ? 'FINISH!' : `Checkpoint ${finishLinesCrossed} / ${totalLaps}`;
                     checkpointAnnounceTimer = 0.8;
+                    fuel = FUEL_MAX;
 
                     if (currentLap > totalLaps) {
                         gameState = 'win';
@@ -1450,6 +1456,75 @@ bikeVelocity = Math.min(100, Math.max(-55, bikeVelocity));
                 ctx.restore();
             }
 
+            function drawFuelBar() {
+                if (gameState !== 'playing' && gameState !== 'paused') return;
+
+                const barWidth = 200;
+                const barHeight = 18;
+                const barX = (canvas.width - barWidth) / 2;
+                const barY = 12;
+                const radius = 9;
+                const fuelRatio = fuel / FUEL_MAX;
+
+                // Fuel color: green -> yellow -> red
+                let r, g;
+                if (fuelRatio > 0.5) {
+                    r = Math.floor(255 * (1 - fuelRatio) * 2);
+                    g = 220;
+                } else {
+                    r = 220;
+                    g = Math.floor(220 * fuelRatio * 2);
+                }
+                const fuelColor = `rgb(${r},${g},30)`;
+
+                // Background track
+                ctx.save();
+                ctx.beginPath();
+                ctx.roundRect(barX - 2, barY - 2, barWidth + 4, barHeight + 4, radius + 2);
+                ctx.fillStyle = 'rgba(0,0,0,0.7)';
+                ctx.fill();
+
+                // Empty bar background
+                ctx.beginPath();
+                ctx.roundRect(barX, barY, barWidth, barHeight, radius);
+                ctx.fillStyle = 'rgba(255,255,255,0.1)';
+                ctx.fill();
+
+                // Filled portion
+                if (fuelRatio > 0) {
+                    const fillWidth = Math.max(radius * 2, barWidth * fuelRatio);
+                    ctx.beginPath();
+                    ctx.roundRect(barX, barY, fillWidth, barHeight, radius);
+                    ctx.fillStyle = fuelColor;
+                    ctx.fill();
+
+                    // Shine overlay
+                    ctx.beginPath();
+                    ctx.roundRect(barX + 2, barY + 2, fillWidth - 4, barHeight / 2 - 2, radius - 2);
+                    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+                    ctx.fill();
+                }
+
+                // Pulse effect when low
+                if (fuelRatio < 0.25) {
+                    const pulse = 0.4 + 0.4 * Math.abs(Math.sin(Date.now() * 0.006));
+                    ctx.beginPath();
+                    ctx.roundRect(barX - 2, barY - 2, barWidth + 4, barHeight + 4, radius + 2);
+                    ctx.strokeStyle = `rgba(255,60,60,${pulse})`;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+
+                // Fuel icon (jerry can emoji or text label)
+                ctx.font = 'bold 12px Arial';
+                ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('', canvas.width / 2, barY + barHeight + 12);
+
+                ctx.restore();
+            }
+
             function drawUI() {
                 debugDiv.innerText = `X:${Math.round(points[0]?.x || 0)} Y:${Math.round(points[0]?.y || 0)} Vel:${Math.round(bikeVelocity)} Lean:${bikeLeanAngle.toFixed(2)} Part:${particles.length}`;
             }
@@ -1486,6 +1561,7 @@ bikeVelocity = Math.min(100, Math.max(-55, bikeVelocity));
                 finishLinesCrossed = 0;
                 finalRaceTime = 0;
                 lapCompleted = new Array(totalLaps).fill(false);
+                fuel = FUEL_MAX;
 
                 gameState = 'playing';
                 particles = [];
@@ -1493,7 +1569,7 @@ bikeVelocity = Math.min(100, Math.max(-55, bikeVelocity));
                 const si = getStageInfo(currentStage);
                 document.getElementById('lap').innerText = `Checkpoint ${si.firstCp} / ${si.finishCp}`;
                 document.getElementById('timer').style.display = 'block';
-                document.getElementById('lap').style.display = 'block';
+                document.getElementById('lap').style.display = 'none';
                 document.getElementById('speedometer').style.display = 'block';
 
                 syncMusic();
@@ -1542,6 +1618,7 @@ bikeVelocity = Math.min(100, Math.max(-55, bikeVelocity));
                 drawBike();
                 drawPauseOverlay();
                 drawCheckpointAnnounce(dt);
+                drawFuelBar();
 
                 if (gameState === 'menu') drawMenu();
                 else if (gameState === 'stageSelect') drawStageSelect();
